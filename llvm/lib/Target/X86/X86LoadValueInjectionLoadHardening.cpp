@@ -63,8 +63,10 @@
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
+#include "X86MinimumDirectedMulticut.h"
 
 using namespace llvm;
+using llvm::X86::MachineGadgetGraph;
 
 #define PASS_KEY "x86-lvi-load"
 #define DEBUG_TYPE PASS_KEY
@@ -110,29 +112,6 @@ typedef int (*OptimizeCutT)(unsigned int *Nodes, unsigned int NodesSize,
 static OptimizeCutT OptimizeCut = nullptr;
 
 namespace {
-
-struct MachineGadgetGraph : ImmutableGraph<MachineInstr *, int> {
-  static constexpr int GadgetEdgeSentinel = -1;
-  static constexpr MachineInstr *const ArgNodeSentinel = nullptr;
-
-  using GraphT = ImmutableGraph<MachineInstr *, int>;
-  using Node = typename GraphT::Node;
-  using Edge = typename GraphT::Edge;
-  using size_type = typename GraphT::size_type;
-  MachineGadgetGraph(std::unique_ptr<Node[]> Nodes,
-                     std::unique_ptr<Edge[]> Edges, size_type NodesSize,
-                     size_type EdgesSize, int NumFences = 0, int NumGadgets = 0)
-      : GraphT(std::move(Nodes), std::move(Edges), NodesSize, EdgesSize),
-        NumFences(NumFences), NumGadgets(NumGadgets) {}
-  static inline bool isCFGEdge(const Edge &E) {
-    return E.getValue() != GadgetEdgeSentinel;
-  }
-  static inline bool isGadgetEdge(const Edge &E) {
-    return E.getValue() == GadgetEdgeSentinel;
-  }
-  int NumFences;
-  int NumGadgets;
-};
 
 class X86LoadValueInjectionLoadHardeningPass : public MachineFunctionPass {
 public:
@@ -313,7 +292,8 @@ bool X86LoadValueInjectionLoadHardeningPass::runOnMachineFunction(
     }
     FencesInserted = hardenLoadsWithPlugin(MF, std::move(Graph));
   } else { // Use the default greedy heuristic
-    FencesInserted = hardenLoadsWithHeuristic(MF, std::move(Graph));
+    X86::MinimumDirectedMulticut mincut(MF, std::move(Graph));
+    mincut.run();
   }
 
   if (FencesInserted > 0)
@@ -650,72 +630,6 @@ int X86LoadValueInjectionLoadHardeningPass::hardenLoadsWithPlugin(
 
     Graph = GraphBuilder::trim(*Graph, NodeSet{*Graph}, CutEdges);
   } while (true);
-
-  return FencesInserted;
-}
-
-int X86LoadValueInjectionLoadHardeningPass::hardenLoadsWithHeuristic(
-    MachineFunction &MF, std::unique_ptr<MachineGadgetGraph> Graph) const {
-  // If `MF` does not have any fences, then no gadgets would have been
-  // mitigated at this point.
-  if (Graph->NumFences > 0) {
-    LLVM_DEBUG(dbgs() << "Eliminating mitigated paths...\n");
-    Graph = trimMitigatedEdges(std::move(Graph));
-    LLVM_DEBUG(dbgs() << "Eliminating mitigated paths... Done\n");
-  }
-
-  if (Graph->NumGadgets == 0)
-    return 0;
-
-  LLVM_DEBUG(dbgs() << "Cutting edges...\n");
-  EdgeSet CutEdges{*Graph};
-
-  // Begin by collecting all ingress CFG edges for each node
-  DenseMap<const Node *, SmallVector<const Edge *, 2>> IngressEdgeMap;
-  for (const Edge &E : Graph->edges())
-    if (MachineGadgetGraph::isCFGEdge(E))
-      IngressEdgeMap[E.getDest()].push_back(&E);
-
-  // For each gadget edge, make cuts that guarantee the gadget will be
-  // mitigated. A computationally efficient way to achieve this is to either:
-  // (a) cut all egress CFG edges from the gadget source, or
-  // (b) cut all ingress CFG edges to the gadget sink.
-  //
-  // Moreover, the algorithm tries not to make a cut into a loop by preferring
-  // to make a (b)-type cut if the gadget source resides at a greater loop depth
-  // than the gadget sink, or an (a)-type cut otherwise.
-  for (const Node &N : Graph->nodes()) {
-    for (const Edge &E : N.edges()) {
-      if (!MachineGadgetGraph::isGadgetEdge(E))
-        continue;
-
-      SmallVector<const Edge *, 2> EgressEdges;
-      SmallVector<const Edge *, 2> &IngressEdges = IngressEdgeMap[E.getDest()];
-      for (const Edge &EgressEdge : N.edges())
-        if (MachineGadgetGraph::isCFGEdge(EgressEdge))
-          EgressEdges.push_back(&EgressEdge);
-
-      int EgressCutCost = 0, IngressCutCost = 0;
-      for (const Edge *EgressEdge : EgressEdges)
-        if (!CutEdges.contains(*EgressEdge))
-          EgressCutCost += EgressEdge->getValue();
-      for (const Edge *IngressEdge : IngressEdges)
-        if (!CutEdges.contains(*IngressEdge))
-          IngressCutCost += IngressEdge->getValue();
-
-      auto &EdgesToCut =
-          IngressCutCost < EgressCutCost ? IngressEdges : EgressEdges;
-      for (const Edge *E : EdgesToCut)
-        CutEdges.insert(*E);
-    }
-  }
-  LLVM_DEBUG(dbgs() << "Cutting edges... Done\n");
-  LLVM_DEBUG(dbgs() << "Cut " << CutEdges.count() << " edges\n");
-
-  LLVM_DEBUG(dbgs() << "Inserting LFENCEs...\n");
-  int FencesInserted = insertFences(MF, *Graph, CutEdges);
-  LLVM_DEBUG(dbgs() << "Inserting LFENCEs... Done\n");
-  LLVM_DEBUG(dbgs() << "Inserted " << FencesInserted << " fences\n");
 
   return FencesInserted;
 }
