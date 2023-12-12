@@ -198,6 +198,8 @@ bool X86SerberusPass::runOnMachineFunction(MachineFunction& MF) {
 
   X86::MinimumDirectedMulticut mincut(MF, std::move(Graph));
   mincut.run();
+
+  return true; // FIXME
 }
 
 std::unique_ptr<MachineGadgetGraph>
