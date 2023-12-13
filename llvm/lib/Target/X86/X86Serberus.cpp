@@ -81,6 +81,8 @@ private:
 
   bool instrUsesRegToAccessMemory(const MachineInstr& MI, unsigned Reg) const;
   bool instrUsesRegToBranch(const MachineInstr& MI, unsigned Reg) const;
+  bool instrIsAccess(const MachineInstr& MI) const;
+  bool instrIsCAAccess(const MachineInstr& MI) const;
   bool instrIsNCAAccess(const MachineInstr& MI) const;
   bool isFence(const MachineInstr *MI) const {
     return MI && MI->getOpcode() == X86::LFENCE;
@@ -89,10 +91,22 @@ private:
 
 }
 
+bool X86SerberusPass::instrIsAccess(const MachineInstr& MI) const {
+  if (!MI.mayLoadOrStore())
+    return false;
+  switch (MI.getOpcode()) {
+  case X86::MFENCE:
+  case X86::SFENCE:
+  case X86::LFENCE:
+    return false;
+  default:
+    return true;
+  }
+}
+
 bool X86SerberusPass::instrUsesRegToAccessMemory(
     const MachineInstr& MI, unsigned Reg) const {
-  if (!MI.mayLoadOrStore() || MI.getOpcode() == X86::MFENCE ||
-      MI.getOpcode() == X86::SFENCE || MI.getOpcode() == X86::LFENCE)
+  if (!instrIsAccess(MI))
     return false;
 
   // FIXME: This does not handle pseudo loading instruction like TCRETURN*
@@ -126,42 +140,41 @@ bool X86SerberusPass::instrUsesRegToBranch(
   return false;
 }
 
-bool X86SerberusPass::instrIsNCAAccess(const MachineInstr& MI) const {
-  if (!MI.mayLoadOrStore() || MI.getOpcode() == X86::MFENCE ||
-      MI.getOpcode() == X86::SFENCE || MI.getOpcode() == X86::LFENCE)
+bool X86SerberusPass::instrIsCAAccess(const MachineInstr& MI) const {
+  if (!instrIsAccess(MI))
     return false;
 
   const MachineFunction& MF = *MI.getParent()->getParent();
   if (MF.getFrameInfo().hasVarSizedObjects())
-    return true;
+    return false;
 
-  // FIXME: This does not handle pseudo loading instruction like TCRETURN*
-  const MCInstrDesc &Desc = MI.getDesc();
-  int MemRefBeginIdx = X86II::getMemoryOperandNo(Desc.TSFlags);
-  if (MemRefBeginIdx < 0) {
-    LLVM_DEBUG(dbgs() << "Warning: unable to obtain memory operand for loading "
-                         "instruction:\n";
-               MI.print(dbgs()); dbgs() << '\n';);
+  auto memop_is_ca = [&] (MachineMemOperand *memop) -> bool {
+    if (const Value *V = memop->getValue()) {
+      if (const auto *AI = dyn_cast<AllocaInst>(V)) {
+        return AI && AI->isStaticAlloca();
+      } else if (isa<Constant>(V)) {
+        return true;
+      } else {
+        return false;
+      }
+    } else if (const PseudoSourceValue *PSV = memop->getPseudoValue()) {
+      // Treat all fixed stack accesses (e.g., stack argument load/stores) as NCA accesses.
+      return PSV->kind() != PseudoSourceValue::FixedStack;
+    } else {
+      return false;
+    }
+  };
+
+  if (MI.memoperands_empty()) {
+    LLVM_DEBUG(dbgs() << "warning: access has no machine mem operands: " << MI);
     return false;
   }
-  MemRefBeginIdx += X86II::getOperandBias(Desc);
 
-  const MachineOperand &BaseMO =
-      MI.getOperand(MemRefBeginIdx + X86::AddrBaseReg);
-  const MachineOperand &IndexMO =
-      MI.getOperand(MemRefBeginIdx + X86::AddrIndexReg);
-  auto IsNCAReg = [&] (const MachineOperand& MO) -> bool {
-    if (!MO.isReg())
-      return false;
-    const Register Reg = MO.getReg();
-    if (Reg == X86::NoRegister)
-      return false;
-    if (TRI->regsOverlap(Reg, X86::RSP) ||
-        (STI->getFrameLowering()->hasFP(MF) && TRI->regsOverlap(Reg, X86::RBP)))
-      return false;
-    return true;
-  };
-  return IsNCAReg(BaseMO) || IsNCAReg(IndexMO);
+  return llvm::all_of(MI.memoperands(), memop_is_ca);
+}
+
+bool X86SerberusPass::instrIsNCAAccess(const MachineInstr& MI) const {
+  return instrIsAccess(MI) && !instrIsCAAccess(MI);
 }
 
 
@@ -280,8 +293,14 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
             // case all arguments will be treated as gadget sources during
             // analysis of the callee function.
             if (UseMI.isCall()) {
-              if (!NoSecretArguments)
+              if (NoSecretArguments) {
+                Transmitters[Def.Id].push_back(Use.Addr->getOwner(DFG).Id);
+              } else {
                 continue;
+              }
+            }
+
+            if (UseMI.isReturn() && NoSecretArguments) {
               Transmitters[Def.Id].push_back(Use.Addr->getOwner(DFG).Id);
             }
 
