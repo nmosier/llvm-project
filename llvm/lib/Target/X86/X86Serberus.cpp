@@ -437,6 +437,37 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
   // GadgetGraph
   GraphIter ArgNode = MaybeAddNode(MachineGadgetGraph::ArgNodeSentinel).first;
   TraverseCFG(&MF.front(), ArgNode, 0);
+
+  // Add in transient control-flow edges:
+  // {returns} -> {post call-sites}
+  // {calls} -> {function entrypoints}
+  SmallVector<MachineInstr *> EntryInstrs, ExitInstrs;
+  for (MachineBasicBlock& MBB : MF) {
+    for (MachineInstr& MI : MBB) {
+      if (MI.isCall()) {
+        ExitInstrs.push_back(&MI);
+        if (MachineInstr *PostCallMI = MI.getNextNode())
+          EntryInstrs.push_back(PostCallMI);
+      } else if (MI.isReturn()) {
+        ExitInstrs.push_back(&MI);
+      }
+    }
+  }
+  std::function<MachineInstr *(MachineBasicBlock *)> GetFirstInstr = [&] (auto *MBB) {
+    assert(MBB);
+    if (!MBB->empty())
+      return &MBB->front();
+    return GetFirstInstr(MBB->getSingleSuccessor());
+  };
+  EntryInstrs.push_back(GetFirstInstr(&MF.front()));
+  for (MachineInstr *EntryMI : EntryInstrs) {
+    for (MachineInstr *ExitMI : ExitInstrs) {
+      Builder.addEdge(
+          std::numeric_limits<MachineGadgetGraph::edge_value_type>::max(),
+          MaybeAddNode(ExitMI).first, MaybeAddNode(EntryMI).first);
+    }
+  }
+  
   std::unique_ptr<MachineGadgetGraph> G(Builder.get(FenceCount, GadgetCount));
   LLVM_DEBUG(dbgs() << "Found " << G->nodes_size() << " nodes\n");
   return G;
