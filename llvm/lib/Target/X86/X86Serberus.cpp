@@ -321,12 +321,12 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
   // has not yet been analyzed, then it will not appear in the map. If a def
   // has been analyzed and was determined not to have any transmitters, then
   // its list of transmitters will be empty.
-  enum class DepTy {
+  enum class DepType {
     Transmitter,
     Data,
     Rf,
   };
-  DenseMap<NodeId, std::vector<std::pair<NodeId, DepTy>>> Deps;
+  DenseMap<NodeId, std::vector<std::pair<NodeId, DepType>>> Deps;
 
   // Analyze all machine instructions to find gadgets and LFENCEs, adding
   // each interesting value to `Nodes`
@@ -374,21 +374,21 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
             // analysis of the callee function.
             if (UseMI.isCall()) {
               if (NoSecretArguments) {
-                Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepTy::Transmitter);
+                Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepType::Transmitter);
               } else {
                 continue;
               }
             }
 
             if (UseMI.isReturn() && NoSecretArguments) {
-              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepTy::Transmitter);
+              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepType::Transmitter);
             }
 
             // Check whether this use can transmit (leak) its value.
             if (instrUsesRegToAccessMemory(UseMI, UseMO.getReg()) ||
                 (!NoConditionalBranches &&
                  instrUsesRegToBranch(UseMI, UseMO.getReg()))) {
-              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepTy::Transmitter);
+              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepType::Transmitter);
               if (UseMI.mayLoad())
                 continue; // Found a transmitting load -- no need to continue
                           // traversing its defs (i.e., this load will become
@@ -398,7 +398,7 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
             // Check whether this use is a data operand of a constant-address
             // stack store.
             if (instrStoresReg(UseMI, UseMO.getReg()))
-              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepTy::Data);
+              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepType::Data);
             
 
             // Check whether the use propagates to more defs.
@@ -433,26 +433,6 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
 
     // Find all of the transmitters
     AnalyzeDefUseChain(SourceDef);
-    SmallVector<NodeId> SourceDefTransmitters;
-    for (const auto& [node, depty] : Deps[SourceDef.Id])
-      if (depty == DepTy::Transmitter)
-        SourceDefTransmitters.push_back(node);
-    if (SourceDefTransmitters.empty())
-      return; // No transmitters for `SourceDef`
-
-    MachineInstr *Source = SourceDef.Addr->getFlags() & NodeAttrs::PhiRef
-                               ? MachineGadgetGraph::ArgNodeSentinel
-                               : SourceDef.Addr->getOp().getParent();
-    auto GadgetSource = MaybeAddNode(Source);
-    // Each transmitter is a sink for `SourceDef`.
-    for (auto TransmitterId : SourceDefTransmitters) {
-      MachineInstr *Sink = DFG.addr<StmtNode *>(TransmitterId).Addr->getCode();
-      auto GadgetSink = MaybeAddNode(Sink);
-      // Add the gadget edge to the graph.
-      Builder.addEdge(MachineGadgetGraph::GadgetEdgeSentinel,
-                      GadgetSource.first, GadgetSink.first);
-      ++GadgetCount;
-    }
   };
 
   LLVM_DEBUG(dbgs() << "Analyzing def-use chains to find gadgets\n");
@@ -479,6 +459,33 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
       }
     }
   }
+
+
+  // Add source-sink pairs to graph.
+  for (const auto& [SourceDefId, Sinks] : Deps) {
+    const auto SourceDef = DFG.addr<DefNode *>(SourceDefId);
+    SmallVector<NodeId> SourceDefTransmitters;
+    for (const auto& [SinkId, DepTy] : Sinks)
+      if (DepTy == DepType::Transmitter)
+        SourceDefTransmitters.push_back(SinkId);
+    if (SourceDefTransmitters.empty())
+      continue;
+
+    MachineInstr *Source = SourceDef.Addr->getFlags() & NodeAttrs::PhiRef
+                               ? MachineGadgetGraph::ArgNodeSentinel
+                               : SourceDef.Addr->getOp().getParent();
+    auto GadgetSource = MaybeAddNode(Source);
+    // Each transmitter is a sink for `SourceDef`.
+    for (auto TransmitterId : SourceDefTransmitters) {
+      MachineInstr *Sink = DFG.addr<StmtNode *>(TransmitterId).Addr->getCode();
+      auto GadgetSink = MaybeAddNode(Sink);
+      // Add the gadget edge to the graph.
+      Builder.addEdge(MachineGadgetGraph::GadgetEdgeSentinel,
+                      GadgetSource.first, GadgetSink.first);
+      ++GadgetCount;
+    }    
+  }
+  
   LLVM_DEBUG(dbgs() << "Found " << FenceCount << " fences\n");
   LLVM_DEBUG(dbgs() << "Found " << GadgetCount << " gadgets\n");
   if (GadgetCount == 0)
