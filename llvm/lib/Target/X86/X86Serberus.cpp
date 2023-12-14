@@ -246,7 +246,12 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
   // has not yet been analyzed, then it will not appear in the map. If a def
   // has been analyzed and was determined not to have any transmitters, then
   // its list of transmitters will be empty.
-  DenseMap<NodeId, std::vector<NodeId>> Transmitters;
+  enum class DepTy {
+    Transmitter,
+    Data,
+    Rf,
+  };
+  DenseMap<NodeId, std::vector<std::pair<NodeId, DepTy>>> Deps;
 
   // Analyze all machine instructions to find gadgets and LFENCEs, adding
   // each interesting value to `Nodes`
@@ -254,7 +259,7 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
     SmallSet<NodeId, 8> UsesVisited, DefsVisited;
     std::function<void(NodeAddr<DefNode *>)> AnalyzeDefUseChain =
         [&](NodeAddr<DefNode *> Def) {
-          if (Transmitters.contains(Def.Id))
+          if (Deps.contains(Def.Id))
             return; // Already analyzed `Def`
 
           // Use RDF to find all the uses of `Def`
@@ -294,26 +299,27 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
             // analysis of the callee function.
             if (UseMI.isCall()) {
               if (NoSecretArguments) {
-                Transmitters[Def.Id].push_back(Use.Addr->getOwner(DFG).Id);
+                Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepTy::Transmitter);
               } else {
                 continue;
               }
             }
 
             if (UseMI.isReturn() && NoSecretArguments) {
-              Transmitters[Def.Id].push_back(Use.Addr->getOwner(DFG).Id);
+              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepTy::Transmitter);
             }
 
             // Check whether this use can transmit (leak) its value.
             if (instrUsesRegToAccessMemory(UseMI, UseMO.getReg()) ||
                 (!NoConditionalBranches &&
                  instrUsesRegToBranch(UseMI, UseMO.getReg()))) {
-              Transmitters[Def.Id].push_back(Use.Addr->getOwner(DFG).Id);
+              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepTy::Transmitter);
               if (UseMI.mayLoad())
                 continue; // Found a transmitting load -- no need to continue
                           // traversing its defs (i.e., this load will become
                           // a new gadget source anyways).
             }
+
 
             // Check whether the use propagates to more defs.
             NodeAddr<InstrNode *> Owner{Use.Addr->getOwner(DFG)};
@@ -330,25 +336,27 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
               AnalyzeDefUseChain(ChildDef);
 
               // `Def` inherits all of its child defs' transmitters.
-              for (auto TransmitterId : Transmitters[ChildDef.Id])
-                Transmitters[Def.Id].push_back(TransmitterId);
+              llvm::copy(Deps[ChildDef.Id], std::back_inserter(Deps[Def.Id]));
             }
           }
 
           // Note that this statement adds `Def.Id` to the map if no
-          // transmitters were found for `Def`.
-          auto &DefTransmitters = Transmitters[Def.Id];
+          // dependencies were found for `Def`.
+          auto &DefDeps = Deps[Def.Id];
 
           // Remove duplicate transmitters
-          llvm::sort(DefTransmitters);
-          DefTransmitters.erase(
-              std::unique(DefTransmitters.begin(), DefTransmitters.end()),
-              DefTransmitters.end());
+          llvm::sort(DefDeps);
+          DefDeps.erase(
+              std::unique(DefDeps.begin(), DefDeps.end()),
+              DefDeps.end());
         };
 
     // Find all of the transmitters
     AnalyzeDefUseChain(SourceDef);
-    auto &SourceDefTransmitters = Transmitters[SourceDef.Id];
+    SmallVector<NodeId> SourceDefTransmitters;
+    for (const auto& [node, depty] : Deps[SourceDef.Id])
+      if (depty == DepTy::Transmitter)
+        SourceDefTransmitters.push_back(node);
     if (SourceDefTransmitters.empty())
       return; // No transmitters for `SourceDef`
 
