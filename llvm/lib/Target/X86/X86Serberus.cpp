@@ -82,8 +82,21 @@ private:
   bool instrUsesRegToAccessMemory(const MachineInstr& MI, unsigned Reg) const;
   bool instrUsesRegToBranch(const MachineInstr& MI, unsigned Reg) const;
   bool instrIsAccess(const MachineInstr& MI) const;
-  bool instrIsCAAccess(const MachineInstr& MI) const;
-  bool instrIsNCAAccess(const MachineInstr& MI) const;
+  
+  bool memopIsCAStack(const MachineMemOperand *MMO) const;
+  bool memopIsCAGlobal(const MachineMemOperand *MMO) const;
+
+  template <class Pred>
+  const MachineMemOperand *getUniqueMemOp(const MachineInstr& MI, Pred pred) const;
+  bool instrIsCAStackLoad(const MachineInstr& MI) const;
+  bool instrIsCAStackStore(const MachineInstr& MI) const;
+  bool instrIsCAGlobalLoad(const MachineInstr& MI) const;
+  bool instrIsCAGlobalStore(const MachineInstr& MI) const;
+  bool instrIsNCALoad(const MachineInstr& MI) const;
+  bool instrIsNCAStore(const MachineInstr& MI) const;
+
+  bool instrStoresReg(const MachineInstr& MI, Register Reg) const;
+
   bool isFence(const MachineInstr *MI) const {
     return MI && MI->getOpcode() == X86::LFENCE;
   }
@@ -140,41 +153,103 @@ bool X86SerberusPass::instrUsesRegToBranch(
   return false;
 }
 
-bool X86SerberusPass::instrIsCAAccess(const MachineInstr& MI) const {
-  if (!instrIsAccess(MI))
-    return false;
-
-  const MachineFunction& MF = *MI.getParent()->getParent();
-  if (MF.getFrameInfo().hasVarSizedObjects())
-    return false;
-
-  auto memop_is_ca = [&] (MachineMemOperand *memop) -> bool {
-    if (const Value *V = memop->getValue()) {
-      if (const auto *AI = dyn_cast<AllocaInst>(V)) {
-        return AI && AI->isStaticAlloca();
-      } else if (isa<Constant>(V)) {
-        return true;
-      } else {
-        return false;
-      }
-    } else if (const PseudoSourceValue *PSV = memop->getPseudoValue()) {
-      // Treat all fixed stack accesses (e.g., stack argument load/stores) as NCA accesses.
-      return PSV->kind() != PseudoSourceValue::FixedStack;
-    } else {
-      return false;
-    }
-  };
-
-  if (MI.memoperands_empty()) {
-    LLVM_DEBUG(dbgs() << "warning: access has no machine mem operands: " << MI);
+bool X86SerberusPass::memopIsCAStack(const MachineMemOperand *MMO) const {
+  if (const auto *AI = dyn_cast_or_null<AllocaInst>(MMO->getValue())) {
+    return AI->isStaticAlloca();
+  } else if (const PseudoSourceValue *PSV = MMO->getPseudoValue()) {
+    return PSV->isStack();
+  } else {
     return false;
   }
-
-  return llvm::all_of(MI.memoperands(), memop_is_ca);
 }
 
-bool X86SerberusPass::instrIsNCAAccess(const MachineInstr& MI) const {
-  return instrIsAccess(MI) && !instrIsCAAccess(MI);
+bool X86SerberusPass::memopIsCAGlobal(const MachineMemOperand *MMO) const {
+  if (isa_and_nonnull<Constant>(MMO->getValue())) {
+    return true;
+  } else if (const PseudoSourceValue *PSV = MMO->getPseudoValue()) {
+    return !PSV->isStack() && PSV->kind() != PseudoSourceValue::FixedStack;
+  } else {
+    return false;
+  }
+}
+
+template <class Pred>
+const MachineMemOperand *X86SerberusPass::getUniqueMemOp(
+    const MachineInstr& MI, Pred pred) const {
+  const MachineMemOperand *TheMMO = nullptr;
+  for (const MachineMemOperand *MMO : MI.memoperands()) {
+    if (pred(MMO)) {
+      if (TheMMO)
+        return nullptr;
+      TheMMO = MMO;
+    }
+  }
+  return TheMMO; 
+}
+
+bool X86SerberusPass::instrIsCAStackLoad(const MachineInstr& MI) const {
+  if (!MI.mayLoad() || !instrIsAccess(MI) ||
+      MI.getParent()->getParent()->getFrameInfo().hasVarSizedObjects())
+    return false;
+  const MachineMemOperand *MMO =
+      getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isLoad));
+  return MMO && memopIsCAStack(MMO);
+}
+
+bool X86SerberusPass::instrIsCAStackStore(const MachineInstr& MI) const {
+  if (!MI.mayStore() || !instrIsAccess(MI) ||
+      MI.getParent()->getParent()->getFrameInfo().hasVarSizedObjects())
+    return false;
+  const MachineMemOperand *MMO =
+      getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isStore));
+  return MMO && memopIsCAStack(MMO);
+}
+
+bool X86SerberusPass::instrIsCAGlobalLoad(const MachineInstr& MI) const {
+  if (!(MI.mayLoad() && instrIsAccess(MI)))
+    return false;
+  const MachineMemOperand *MMO =
+      getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isLoad));
+  return MMO && memopIsCAGlobal(MMO);
+}
+
+bool X86SerberusPass::instrIsCAGlobalStore(const MachineInstr& MI) const {
+  if (!(MI.mayStore() && instrIsAccess(MI)))
+    return false;
+  const MachineMemOperand *MMO =
+      getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isStore));
+  return MMO && memopIsCAGlobal(MMO);
+}
+
+bool X86SerberusPass::instrIsNCALoad(const MachineInstr& MI) const {
+  return MI.mayLoad() && instrIsAccess(MI)
+      && !instrIsCAStackLoad(MI) && !instrIsCAGlobalLoad(MI);
+}
+
+bool X86SerberusPass::instrIsNCAStore(const MachineInstr& MI) const {
+  return MI.mayStore() && instrIsAccess(MI)
+      && !instrIsCAStackStore(MI) && !instrIsCAGlobalStore(MI);
+}
+
+bool X86SerberusPass::instrStoresReg(
+    const MachineInstr& MI, Register Reg) const {
+  assert(Reg != X86::NoRegister);
+  if (!MI.mayStore() || instrUsesRegToAccessMemory(MI, Reg))
+    return false;
+  
+  // Assume that the data register of a store is its unique explicit
+  // non-address-operand register, if one exists.
+  Register TheDataReg = X86::NoRegister;
+  for (const MachineOperand& MO : MI.explicit_uses()) {
+    if (MO.isReg() && MO.isUse() && !MO.isImplicit()) {
+      if (TheDataReg != X86::NoRegister) {
+        LLVM_DEBUG(dbgs() << "skipping store with multiple candidate data registers: " << MI);
+        return false;
+      }
+      TheDataReg = MO.getReg();
+    }
+  }
+  return Reg == TheDataReg;
 }
 
 
@@ -320,6 +395,11 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
                           // a new gadget source anyways).
             }
 
+            // Check whether this use is a data operand of a constant-address
+            // stack store.
+            if (instrStoresReg(UseMI, UseMO.getReg()))
+              Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepTy::Data);
+            
 
             // Check whether the use propagates to more defs.
             NodeAddr<InstrNode *> Owner{Use.Addr->getOwner(DFG)};
@@ -393,7 +473,7 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
       if (isFence(MI)) {
         MaybeAddNode(MI);
         ++FenceCount;
-      } else if (MI->mayLoad() && instrIsNCAAccess(*MI)) {
+      } else if (instrIsNCALoad(*MI)) {
         NodeList Defs = SA.Addr->members_if(DataFlowGraph::IsDef, DFG);
         llvm::for_each(Defs, AnalyzeDef);
       }
