@@ -88,19 +88,39 @@ private:
 
   template <class Pred>
   const MachineMemOperand *getUniqueMemOp(const MachineInstr& MI, Pred pred) const;
-  bool instrIsCAStackLoad(const MachineInstr& MI) const;
-  bool instrIsCAStackStore(const MachineInstr& MI) const;
-  bool instrIsCAGlobalLoad(const MachineInstr& MI) const;
-  bool instrIsCAGlobalStore(const MachineInstr& MI) const;
-  bool instrIsNCALoad(const MachineInstr& MI) const;
-  bool instrIsNCAStore(const MachineInstr& MI) const;
 
-  bool instrStoresReg(const MachineInstr& MI, Register Reg) const;
+  struct AccessInfo {
+    enum AccessType {None, NCA, CAStack, CAGlobal} Kind;
+    SmallVector<Register> DataRegs;
+
+    bool isNCA() const { return Kind == NCA; }
+    bool isCAStack() const { return Kind == CAStack; }
+    bool isCAGlobal() const { return Kind == CAGlobal; }
+    bool alias(Register Regs, const TargetRegisterInfo *TRI) const;
+  };
+
+  AccessInfo classifyLoad(const MachineInstr& MI) const;
+  AccessInfo classifyStore(const MachineInstr& MI) const;
 
   bool isFence(const MachineInstr *MI) const {
     return MI && MI->getOpcode() == X86::LFENCE;
   }
 };
+
+template <class Range, class Pred>
+void GetUniqueElementIf(Range&& range, Pred pred) {
+  auto elem = range.end();
+  for (auto it = range.begin(); it != range.end(); ++it) {
+    if (pred(*it)) {
+      if (elem == range.end()) {
+        elem = it;
+      } else {
+        return range.end();
+      }
+    }
+  }
+  return elem;
+}
 
 }
 
@@ -115,6 +135,12 @@ bool X86SerberusPass::instrIsAccess(const MachineInstr& MI) const {
   default:
     return true;
   }
+}
+
+bool X86SerberusPass::AccessInfo::alias(Register Reg, const TargetRegisterInfo *TRI) const {
+  return llvm::any_of(DataRegs, [TRI, Reg] (Register DataReg) -> bool {
+    return TRI->regsOverlap(Reg, DataReg);
+  });
 }
 
 bool X86SerberusPass::instrUsesRegToAccessMemory(
@@ -187,69 +213,78 @@ const MachineMemOperand *X86SerberusPass::getUniqueMemOp(
   return TheMMO; 
 }
 
-bool X86SerberusPass::instrIsCAStackLoad(const MachineInstr& MI) const {
-  if (!MI.mayLoad() || !instrIsAccess(MI) ||
-      MI.getParent()->getParent()->getFrameInfo().hasVarSizedObjects())
-    return false;
-  const MachineMemOperand *MMO =
-      getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isLoad));
-  return MMO && memopIsCAStack(MMO);
-}
+X86SerberusPass::AccessInfo X86SerberusPass::classifyLoad(const MachineInstr& MI) const {
+  AccessInfo Info;
 
-bool X86SerberusPass::instrIsCAStackStore(const MachineInstr& MI) const {
-  if (!MI.mayStore() || !instrIsAccess(MI) ||
-      MI.getParent()->getParent()->getFrameInfo().hasVarSizedObjects())
-    return false;
-  const MachineMemOperand *MMO =
-      getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isStore));
-  return MMO && memopIsCAStack(MMO);
-}
+  // FIXME: Handle calls properly.
+  if (!MI.mayLoad() || !instrIsAccess(MI) || MI.isCall()) {
+    Info.Kind = AccessInfo::None;
+    return Info;
+  }
 
-bool X86SerberusPass::instrIsCAGlobalLoad(const MachineInstr& MI) const {
-  if (!(MI.mayLoad() && instrIsAccess(MI)))
-    return false;
-  const MachineMemOperand *MMO =
-      getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isLoad));
-  return MMO && memopIsCAGlobal(MMO);
-}
-
-bool X86SerberusPass::instrIsCAGlobalStore(const MachineInstr& MI) const {
-  if (!(MI.mayStore() && instrIsAccess(MI)))
-    return false;
-  const MachineMemOperand *MMO =
-      getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isStore));
-  return MMO && memopIsCAGlobal(MMO);
-}
-
-bool X86SerberusPass::instrIsNCALoad(const MachineInstr& MI) const {
-  return MI.mayLoad() && instrIsAccess(MI)
-      && !instrIsCAStackLoad(MI) && !instrIsCAGlobalLoad(MI);
-}
-
-bool X86SerberusPass::instrIsNCAStore(const MachineInstr& MI) const {
-  return MI.mayStore() && instrIsAccess(MI)
-      && !instrIsCAStackStore(MI) && !instrIsCAGlobalStore(MI);
-}
-
-bool X86SerberusPass::instrStoresReg(
-    const MachineInstr& MI, Register Reg) const {
-  assert(Reg != X86::NoRegister);
-  if (!MI.mayStore() || instrUsesRegToAccessMemory(MI, Reg))
-    return false;
-  
-  // Assume that the data register of a store is its unique explicit
-  // non-address-operand register, if one exists.
-  Register TheDataReg = X86::NoRegister;
-  for (const MachineOperand& MO : MI.explicit_uses()) {
-    if (MO.isReg() && MO.isUse() && !MO.isImplicit()) {
-      if (TheDataReg != X86::NoRegister) {
-        LLVM_DEBUG(dbgs() << "skipping store with multiple candidate data registers: " << MI);
-        return false;
-      }
-      TheDataReg = MO.getReg();
+  // Deduce kind of load.
+  Info.Kind = AccessInfo::NCA;
+  if (const MachineMemOperand *MMO = getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isLoad))) {
+    if (memopIsCAGlobal(MMO)) {
+      Info.Kind = AccessInfo::CAGlobal;
+    } else if (memopIsCAStack(MMO) && !MI.getParent()->getParent()->getFrameInfo().hasVarSizedObjects()) {
+      Info.Kind = AccessInfo::CAStack;
     }
   }
-  return Reg == TheDataReg;
+  
+  // Compute load's output registers.
+  for (const MachineOperand& MO : MI.defs())
+    if (MO.isReg() && MO.isDef())
+      Info.DataRegs.push_back(MO.getReg());
+
+  return Info;
+}
+
+X86SerberusPass::AccessInfo X86SerberusPass::classifyStore(const MachineInstr& MI) const {
+  AccessInfo Info;
+
+  // FIXME: Handle calls properly.
+  if (!MI.mayStore() || !instrIsAccess(MI) || MI.isCall()) {
+    Info.Kind = AccessInfo::None;
+    return Info;
+  }
+
+  // Deduce kind of store.
+  Info.Kind = AccessInfo::NCA;
+  if (const MachineMemOperand *MMO = getUniqueMemOp(MI, std::mem_fn(&MachineMemOperand::isStore))) {
+    if (memopIsCAGlobal(MMO)) {
+      Info.Kind = AccessInfo::CAGlobal;
+    } else if (memopIsCAStack(MMO) && !MI.getParent()->getParent()->getFrameInfo().hasVarSizedObjects()) {
+      Info.Kind = AccessInfo::CAStack;
+    }
+  }
+
+  // Compute store's input registers.
+  const MCInstrDesc& Desc = MI.getDesc();
+  int MemRefBeginIdx = X86II::getMemoryOperandNo(Desc.TSFlags);
+  int MemRefEndIdx = MemRefBeginIdx;
+  if (MemRefBeginIdx >= 0) {
+    MemRefBeginIdx += X86II::getOperandBias(Desc);
+    MemRefEndIdx += X86::AddrNumOperands;
+  }
+
+  for (const MachineOperand& MO : MI.uses()) {
+    const int OpNum = MO.getOperandNo();
+    if (OpNum >= MemRefBeginIdx && OpNum < MemRefEndIdx)
+      continue;
+    if (MO.isReg() && MO.isUse() && !MO.isImplicit())
+      Info.DataRegs.push_back(MO.getReg());
+  }
+  if (Info.DataRegs.size() != 1) {
+    Info.Kind = AccessInfo::NCA;
+    if (Info.DataRegs.empty()) {
+      LLVM_DEBUG(dbgs() << "Unable to determine store's data operands (conservatiely treating as NCA store): " << MI);
+    } else {
+      LLVM_DEBUG(dbgs() << "Found multiple store data operands (conservatively treating as NCA store): " << MI);
+    }
+  }
+                  
+  return Info;
 }
 
 
@@ -324,9 +359,8 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
   enum class DepType {
     Transmitter,
     Data,
-    Rf,
   };
-  DenseMap<NodeId, std::vector<std::pair<NodeId, DepType>>> Deps;
+  DenseMap<NodeId, std::vector<std::pair<NodeId, DepType>>> Deps; // TODO: Note that these are only register dependencies. Sources are defs; destinations are uses.
 
   // Analyze all machine instructions to find gadgets and LFENCEs, adding
   // each interesting value to `Nodes`
@@ -397,7 +431,7 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
 
             // Check whether this use is a data operand of a constant-address
             // stack store.
-            if (instrStoresReg(UseMI, UseMO.getReg()))
+            if (classifyStore(UseMI).alias(UseMO.getReg(), TRI))
               Deps[Def.Id].emplace_back(Use.Addr->getOwner(DFG).Id, DepType::Data);
             
 
@@ -453,12 +487,61 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
       if (isFence(MI)) {
         MaybeAddNode(MI);
         ++FenceCount;
-      } else if (instrIsNCALoad(*MI)) {
+      } else if (MI->mayLoad()) {
         NodeList Defs = SA.Addr->members_if(DataFlowGraph::IsDef, DFG);
         llvm::for_each(Defs, AnalyzeDef);
       }
     }
   }
+
+
+  // Add stack memory dependencies to graph.
+  SmallVector<NodeId> CAStackLoads, CAStackStores;
+  for (NodeAddr<BlockNode *> BA : DFG.getFunc().Addr->members(DFG)) {
+    for (NodeAddr<StmtNode *> SA :
+             BA.Addr->members_if(DataFlowGraph::IsCode<NodeAttrs::Stmt>, DFG)) {
+      MachineInstr *MI = SA.Addr->getCode();
+      const AccessInfo LoadInfo = classifyLoad(*MI);
+      const AccessInfo StoreInfo = classifyStore(*MI);
+      NodeList Defs = SA.Addr->members_if(DataFlowGraph::IsDef, DFG);
+      if (LoadInfo.isCAStack())
+        for (NodeAddr<DefNode *> Def : SA.Addr->members_if(DataFlowGraph::IsDef, DFG)) {
+          if (LoadInfo.alias(Def.Addr->getOp().getReg(), TRI))
+            CAStackLoads.push_back(Def.Id);
+        }
+      if (StoreInfo.isCAStack())
+        for (NodeAddr<UseNode *> Use : SA.Addr->members_if(DataFlowGraph::IsUse, DFG))
+          if (StoreInfo.alias(Use.Addr->getOp().getReg(), TRI))
+            CAStackStores.push_back(Use.Id);
+    }
+  }
+
+  DenseMap<NodeId, SmallSet<NodeId, 4>> CAStackDeps;
+  for (NodeId StoreId : CAStackStores) {
+    MachineInstr *Store = DFG.addr<UseNode *>(StoreId).Addr->getOp().getParent();
+    for (NodeId LoadId : CAStackLoads) {
+      MachineInstr *Load = DFG.addr<DefNode *>(LoadId).Addr->getOp().getParent();
+      if (Store->mayAlias(nullptr, *Load, false))
+        CAStackDeps[StoreId].insert(LoadId);
+    }
+  }
+
+  while (true) {
+    auto DepsBak = Deps;
+
+    for (const auto& [DefId, UseIds] : Deps) {
+      for (auto& [UseId, UseType] : UseIds) {
+        if (UseType == DepType::Data) {
+          // Propagate back from all aliasing loads.
+          for (NodeId LoadId : CAStackDeps[UseId])
+            llvm::copy(Deps[LoadId], std::back_inserter(Deps[DefId]));
+        }
+      }
+    }
+
+    if (Deps == DepsBak)
+      break;
+  }    
 
 
   // Add source-sink pairs to graph.
