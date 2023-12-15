@@ -96,6 +96,7 @@ private:
     bool isNCA() const { return Kind == NCA; }
     bool isCAStack() const { return Kind == CAStack; }
     bool isCAGlobal() const { return Kind == CAGlobal; }
+    bool isCA() const { return isCAStack() || isCAGlobal(); }
     bool alias(Register Regs, const TargetRegisterInfo *TRI) const;
   };
 
@@ -268,20 +269,29 @@ X86SerberusPass::AccessInfo X86SerberusPass::classifyStore(const MachineInstr& M
     MemRefEndIdx += X86::AddrNumOperands;
   }
 
-  for (const MachineOperand& MO : MI.uses()) {
+  SmallVector<const MachineOperand *> DataOps;
+  for (const MachineOperand& MO : MI.operands()) {
     const int OpNum = MO.getOperandNo();
-    if (OpNum >= MemRefBeginIdx && OpNum < MemRefEndIdx)
+    if (MemRefBeginIdx <= OpNum && OpNum < MemRefEndIdx)
       continue;
-    if (MO.isReg() && MO.isUse() && !MO.isImplicit())
-      Info.DataRegs.push_back(MO.getReg());
+    if (!MO.isReg() || MO.isUse())
+      DataOps.push_back(&MO);
   }
-  if (Info.DataRegs.size() != 1) {
-    Info.Kind = AccessInfo::NCA;
-    if (Info.DataRegs.empty()) {
-      LLVM_DEBUG(dbgs() << "Unable to determine store's data operands (conservatiely treating as NCA store): " << MI);
+
+
+  if (DataOps.size() == 1) {
+    const MachineOperand *DataOp = DataOps.front();
+    if (DataOp->isReg()) {
+      Info.DataRegs.push_back(DataOp->getReg());
+    } else if (DataOp->isImm()) {
+      Info.Kind = AccessInfo::None;
     } else {
-      LLVM_DEBUG(dbgs() << "Found multiple store data operands (conservatively treating as NCA store): " << MI);
+      LLVM_DEBUG(dbgs() << "unrecoginzed data operand of store '" << *DataOp << "' in store: " << MI);
+      Info.Kind = AccessInfo::NCA;
     }
+  } else {
+    LLVM_DEBUG(dbgs() << "multiple candidate data operands found for store: " << MI);
+    Info.Kind = AccessInfo::NCA;
   }
                   
   return Info;
@@ -567,6 +577,25 @@ X86SerberusPass::getGadgetGraph(MachineFunction& MF, const MachineLoopInfo& MLI,
                       GadgetSource.first, GadgetSink.first);
       ++GadgetCount;
     }    
+  }
+
+  SmallVector<MachineInstr *> NCAStores, ExitsAndCALoads;
+  for (MachineBasicBlock& MBB : MF) {
+    for (MachineInstr& MI : MBB) {
+      if (classifyStore(MI).isNCA())
+        NCAStores.push_back(&MI);
+      // TODO: Only add CA loads that have dependent transmitters.
+      if (classifyLoad(MI).isCA() || MI.isCall() || MI.isReturn())
+        ExitsAndCALoads.push_back(&MI);
+    }
+  }
+
+  for (MachineInstr *Source : NCAStores) {
+    for (MachineInstr *Sink : ExitsAndCALoads) {
+      Builder.addEdge(MachineGadgetGraph::GadgetEdgeSentinel,
+                      MaybeAddNode(Source).first, MaybeAddNode(Sink).first);
+      ++GadgetCount;
+    }
   }
   
   LLVM_DEBUG(dbgs() << "Found " << FenceCount << " fences\n");
