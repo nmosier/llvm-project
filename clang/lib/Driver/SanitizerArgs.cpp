@@ -549,7 +549,9 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
                      SanitizerKind::Address | SanitizerKind::KernelAddress |
                          SanitizerKind::HWAddress |
                          SanitizerKind::KernelHWAddress),
-      std::make_pair(SanitizerKind::KCFI, SanitizerKind::Function)};
+      std::make_pair(SanitizerKind::KCFI, SanitizerKind::Function),
+      std::make_pair(SanitizerKind::FunctionPrivateStacks, SanitizerKind::SafeStack)
+  };
   // Enable toolchain specific default sanitizers if not explicitly disabled.
   SanitizerMask Default = TC.getDefaultSanitizers() & ~AllRemove;
 
@@ -1047,6 +1049,10 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
     // SafeStack runtime is built into the system on Android and Fuchsia.
     SafeStackRuntime =
         !TC.getTriple().isAndroid() && !TC.getTriple().isOSFuchsia();
+  }
+
+  if (AllAddedKinds & SanitizerKind::FunctionPrivateStacks) {
+    FunctionPrivateStacksRuntime = true;
   }
 
   LinkRuntimes =

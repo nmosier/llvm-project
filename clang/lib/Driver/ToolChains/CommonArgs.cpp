@@ -1392,6 +1392,9 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
     NonWholeStaticRuntimes.push_back("safestack");
     RequiredSymbols.push_back("__safestack_init");
   }
+  if (SanArgs.needsFPSRt() && SanArgs.linkRuntimes()) {
+    StaticRuntimes.push_back("fps");
+  }
   if (!(SanArgs.needsSharedRt() && SanArgs.needsUbsanRt() && SanArgs.linkRuntimes())) {
     if (SanArgs.needsCfiRt() && SanArgs.linkRuntimes())
       StaticRuntimes.push_back("cfi");

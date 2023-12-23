@@ -56,6 +56,7 @@ class SanitizerArgs {
   bool LinkCXXRuntimes = false;
   bool NeedPIE = false;
   bool SafeStackRuntime = false;
+  bool FunctionPrivateStacksRuntime = false;
   bool Stats = false;
   bool TsanMemoryAccess = true;
   bool TsanFuncEntryExit = true;
@@ -99,6 +100,7 @@ public:
   bool requiresMinimalRuntime() const { return MinimalRuntime; }
   bool needsDfsanRt() const { return Sanitizers.has(SanitizerKind::DataFlow); }
   bool needsSafeStackRt() const { return SafeStackRuntime; }
+  bool needsFPSRt() const { return FunctionPrivateStacksRuntime; }
   bool needsCfiRt() const;
   bool needsCfiDiagRt() const;
   bool needsStatsRt() const { return Stats; }

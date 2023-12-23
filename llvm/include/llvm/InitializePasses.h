@@ -267,6 +267,7 @@ void initializeResetMachineFunctionPass(PassRegistry&);
 void initializeSCEVAAWrapperPassPass(PassRegistry&);
 void initializeSROALegacyPassPass(PassRegistry&);
 void initializeSafeStackLegacyPassPass(PassRegistry&);
+void initializeFunctionPrivateStacksLegacyPassPass(PassRegistry&);
 void initializeSafepointIRVerifierPass(PassRegistry&);
 void initializeSelectOptimizePass(PassRegistry &);
 void initializeScalarEvolutionWrapperPassPass(PassRegistry&);

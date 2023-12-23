@@ -795,6 +795,8 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
   }
   if (SanOpts.has(SanitizerKind::SafeStack))
     Fn->addFnAttr(llvm::Attribute::SafeStack);
+  if (SanOpts.has(SanitizerKind::FunctionPrivateStacks))
+    Fn->addFnAttr(llvm::Attribute::FunctionPrivateStack);
   if (SanOpts.has(SanitizerKind::ShadowCallStack))
     Fn->addFnAttr(llvm::Attribute::ShadowCallStack);
 

@@ -30,6 +30,7 @@
 #include "llvm/CodeGen/PreISelIntrinsicLowering.h"
 #include "llvm/CodeGen/ReplaceWithVeclib.h"
 #include "llvm/CodeGen/SafeStack.h"
+#include "llvm/CodeGen/FunctionPrivateStacks.h"
 #include "llvm/CodeGen/UnreachableBlockElim.h"
 #include "llvm/CodeGen/WasmEHPrepare.h"
 #include "llvm/CodeGen/WinEHPrepare.h"
@@ -725,6 +726,7 @@ void CodeGenPassBuilder<Derived>::addISelPrepare(AddIRPass &addPass) const {
   // Add both the safe stack and the stack protection passes: each of them will
   // only protect functions that have corresponding attributes.
   addPass(SafeStackPass(&TM));
+  addPass(FunctionPrivateStacksPass()); // NHM-FIXME: Should only protect functions with attribute.
   addPass(StackProtectorPass());
 
   if (Opt.PrintISelInput)

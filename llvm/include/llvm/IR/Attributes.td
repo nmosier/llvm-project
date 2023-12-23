@@ -233,6 +233,8 @@ def ReturnsTwice : EnumAttr<"returns_twice", [FnAttr]>;
 /// Safe Stack protection.
 def SafeStack : EnumAttr<"safestack", [FnAttr]>;
 
+def FunctionPrivateStack : EnumAttr<"functionprivatestack", [FnAttr]>;
+
 /// Shadow Call Stack protection.
 def ShadowCallStack : EnumAttr<"shadowcallstack", [FnAttr]>;
 

@@ -432,6 +432,7 @@ int main(int argc, char **argv) {
   initializeWinEHPreparePass(Registry);
   initializeDwarfEHPrepareLegacyPassPass(Registry);
   initializeSafeStackLegacyPassPass(Registry);
+  initializeFunctionPrivateStacksLegacyPassPass(Registry);
   initializeSjLjEHPreparePass(Registry);
   initializePreISelIntrinsicLoweringLegacyPassPass(Registry);
   initializeGlobalMergePass(Registry);
