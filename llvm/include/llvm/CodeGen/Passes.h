@@ -477,6 +477,9 @@ namespace llvm {
   /// protect against stack-based overflow vulnerabilities.
   FunctionPass *createSafeStackPass();
 
+  // NHM-TODO: Document.
+  ModulePass *createFunctionPrivateStacksPass();
+
   /// This pass detects subregister lanes in a virtual register that are used
   /// independently of other lanes and splits them into separate virtual
   /// registers.
