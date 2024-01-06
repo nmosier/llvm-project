@@ -629,9 +629,17 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   }
 
   // NHM-FIXME: Check if we even need a function-private stack.
-  if (EnableFunctionPrivateStacks)
+  if (EnableFunctionPrivateStacks) {
+    assert(Is64Bit && "Function-Private Stacks only supported in 64-bit mode!");
     for (MCRegAliasIterator AI(X86::RBX, this, true); AI.isValid(); ++AI)
       Reserved.set(*AI);
+    const auto CM = MF.getTarget().getCodeModel();
+      // NHM-FIXME: Add FPS predicate for checking whether we need 64-bit TLS offsets.
+      // NHM-FIXME: assert not 32-bit
+    if (CM == CodeModel::Medium || CM == CodeModel::Large)
+      for (MCRegAliasIterator AI(X86::R15, this, true); AI.isValid(); ++AI)
+        Reserved.set(*AI);
+  }
 
   assert(checkAllSuperRegsMarked(Reserved,
                                  {X86::SIL, X86::DIL, X86::BPL, X86::SPL,

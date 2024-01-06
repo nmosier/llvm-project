@@ -34,13 +34,11 @@ public:
 void FunctionPrivateStacks::runOnFunction(Function &F) {
   // NHM-FIXME: Assert only works on 64-bit architectures.
 
-  constexpr uint64_t StackSize = 1024 * 64; // 64KB per stack for now
-
-  const auto StackTy = ArrayType::get(IntegerType::get(Ctx, 8), StackSize);
+  const auto StackTy = ArrayType::get(IntegerType::get(Ctx, 8), PrivateStackSize);
   auto *Stack = new GlobalVariable(M, StackTy, /*isConstant*/false, GlobalVariable::PrivateLinkage, Constant::getNullValue(StackTy), "__fps_stack_" + F.getName(), nullptr, GlobalVariable::InitialExecTLSModel);
   
-  const auto StackPtrTy = IntegerType::get(Ctx, 32);
-  auto *StackPtr = new GlobalVariable(M, StackPtrTy, /*isConstant*/false, GlobalVariable::PrivateLinkage, ConstantInt::get(StackPtrTy, StackSize), "__fps_stackptr_" + F.getName(), nullptr, GlobalVariable::InitialExecTLSModel);
+  const auto StackPtrTy = IntegerType::get(Ctx, 64);
+  auto *StackPtr = new GlobalVariable(M, StackPtrTy, /*isConstant*/false, GlobalVariable::PrivateLinkage, ConstantInt::get(StackPtrTy, PrivateStackSize), "__fps_stackptr_" + F.getName(), nullptr, GlobalVariable::InitialExecTLSModel);
 }
 
 bool FunctionPrivateStacks::run() {
