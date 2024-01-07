@@ -41,8 +41,14 @@ private:
 
   void loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
   void loadPrivateStackBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
+  void loadPrivateStackPointerAndBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
 };
+
+void X86FunctionPrivateStacks::loadPrivateStackPointerAndBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc& Loc) {
+  loadPrivateStackPointer(MBB, MBBI, Loc);
+  loadPrivateStackBase(MBB, MBBI, Loc);
+}
 
 void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc) {
   // NHM-FIXME: add MachineMemOperand.
@@ -256,12 +262,35 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   }
 
   // Reload after calls.
-  for (MachineInstr *Call : Calls) {
-    MachineBasicBlock &CallMBB = *Call->getParent();
-    auto CallMBBI = std::next(Call->getIterator());
-    loadPrivateStackPointer(CallMBB, CallMBBI);
-    loadPrivateStackBase(CallMBB, CallMBBI);
+  for (MachineInstr *Call : Calls)
+    loadPrivateStackPointerAndBase(*Call->getParent(), std::next(Call->getIterator()));
+
+  // Reload after instructions that clobber it.
+  SmallVector<MachineInstr *> Clobbers;
+  for (MachineBasicBlock &MBB : MF)
+    for (MachineInstr &MI : MBB)
+      for (const MachineOperand &MO : MI.operands())
+        if (MO.isRegMask() && (MO.clobbersPhysReg(X86::RBX) || (needsFarTLS() && MO.clobbersPhysReg(X86::R15))))
+          Clobbers.push_back(&MI);
+  for (MachineInstr *Clobber : Clobbers)
+    if (Clobber->isTerminator())
+      for (MachineBasicBlock *Succ : Clobber->getParent()->successors())
+        loadPrivateStackPointerAndBase(*Succ, Succ->begin());
+    else
+      loadPrivateStackPointerAndBase(*Clobber->getParent(), std::next(Clobber->getIterator()));
+
+#if 0
+  // Reload at the target of EH_SjLj_Setup instructions.
+  SmallVector<MachineInstr *> EH_SjLj_Setups;
+  for (MachineBasicBlock &MBB : MF)
+    for (MachineInstr &MI : MBB)
+      if (MI.getOpcode() == X86::EH_SjLj_Setup)
+        EH_SjLj_Setups.push_back(&MI);
+  for (MachineInstr *MI : EH_SjLj_Setups) {
+    MachineBasicBlock &TgtMBB = *MI->getOperand(0).getMBB();
+    loadPrivateStackPointerAndBase(TgtMBB, TgtMBB.begin());
   }
+#endif
 
   MF.verify();
 #if 0 
