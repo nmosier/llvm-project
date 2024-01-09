@@ -7,6 +7,8 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 using namespace llvm;
 
@@ -23,28 +25,57 @@ class FunctionPrivateStacks {
   Module &M;
   LLVMContext &Ctx;
   bool Changed;
-
-  void runOnFunction(Function &F);
+  IntegerType *Int64Ty;
+  GlobalVariable *StackVecVar;
+  FunctionCallee RegStack;
+  FunctionCallee DeregStack;
+  
+  void runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRBuilder<> &DtorIRB);
   
 public:
   FunctionPrivateStacks(Module &M) : M(M), Ctx(M.getContext()), Changed(false) {}
   bool run();
 };
 
-void FunctionPrivateStacks::runOnFunction(Function &F) {
+void FunctionPrivateStacks::runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRBuilder<> &DtorIRB) {
   // NHM-FIXME: Assert only works on 64-bit architectures.
 
-  const auto StackTy = ArrayType::get(IntegerType::get(Ctx, 8), PrivateStackSize);
-  auto *Stack = new GlobalVariable(M, StackTy, /*isConstant*/false, GlobalVariable::PrivateLinkage, Constant::getNullValue(StackTy), "__fps_stack_" + F.getName(), nullptr, GlobalVariable::InitialExecTLSModel);
-  
-  const auto StackPtrTy = IntegerType::get(Ctx, 64);
-  auto *StackPtr = new GlobalVariable(M, StackPtrTy, /*isConstant*/false, GlobalVariable::PrivateLinkage, ConstantInt::get(StackPtrTy, PrivateStackSize), "__fps_stackptr_" + F.getName(), nullptr, GlobalVariable::InitialExecTLSModel);
+  // NHM-FIXME: Should this always have private linkage?
+  auto *StackIdxVar = new GlobalVariable(M, Int64Ty, /*isConstant*/false, GlobalVariable::PrivateLinkage, Constant::getNullValue(Int64Ty) , "__fps_stackidx_" + F.getName());
+
+  // Register stack.
+  Value *StackIdx = CtorIRB.CreateCall(RegStack);
+  CtorIRB.CreateStore(StackIdx, StackIdxVar);
+
+  // Deregister stack.
+  DtorIRB.CreateCall(DeregStack, {DtorIRB.CreateLoad(Int64Ty, StackIdxVar)});
 }
 
 bool FunctionPrivateStacks::run() {
+  Int64Ty = IntegerType::get(Ctx, 64);
+    
+  // Declare thread-local variable.
+  StackVecVar = new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thdstacks");
+
+  auto *CtorTy = FunctionType::get(Type::getVoidTy(Ctx), {}, /*isVarArg*/false);
+  auto *Ctor = Function::Create(CtorTy, Function::PrivateLinkage, "__fps_regstack_ctor", M);
+  IRBuilder<> CtorIRB(BasicBlock::Create(Ctx, "", Ctor));
+  auto *Dtor = Function::Create(CtorTy, Function::PrivateLinkage, "__fps_regstack_dtor", M);
+  IRBuilder<> DtorIRB(BasicBlock::Create(Ctx, "", Dtor));
+
+  RegStack = Function::Create(FunctionType::get(Int64Ty, {}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_regstack", M);
+  DeregStack = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Int64Ty}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_deregstack", M);
+  
   for (Function &F : M)
-    if (!F.isDeclaration())
-      runOnFunction(F);
+    if (!F.isDeclaration() && !F.getName().startswith("__fps_"))
+      runOnFunction(F, CtorIRB, DtorIRB);
+
+  CtorIRB.CreateRetVoid();
+  DtorIRB.CreateRetVoid();
+
+  appendToGlobalCtors(M, Ctor, 0);
+  appendToGlobalDtors(M, Dtor, 0);
+  
   return Changed;
 }
 

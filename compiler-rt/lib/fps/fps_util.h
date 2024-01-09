@@ -1,0 +1,115 @@
+#pragma once
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+
+#include "safestack/safestack_platform.h"
+
+#define FPS_CHECK(a)                                            \
+  do {                                                          \
+    if (!(a)) {                                                 \
+      fprintf(stderr, "fps CHECK failed: %s:%d %s\n", __FILE__, \
+              __LINE__, #a);                                    \
+      abort();                                                  \
+    }                                                           \
+  } while (false)
+
+
+inline void *operator new(size_t count, void *here) { return here; }
+
+namespace fps {
+
+template <typename T>
+T max(T a, T b) {
+  return a > b ? a : b;
+}
+
+template <typename T>
+T align_up(T n, T align) {
+  return ((n + (align - 1)) / align) * align;
+}
+
+inline void *Mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address = nullptr) {
+#if SANITIZER_NETBSD
+  return __mremap(old_address, old_size, new_size, flags, new_address);
+#elif SANITIZER_FREEBSD && (defined(__aarch64__) || defined(__x86_64__))
+  return (void *) __syscall(SYS_mremap, old_address, old_size, new_size, flags, new_address);
+#else
+  return (void *) syscall(SYS_mremap, old_address, old_size, new_size, flags, new_address);
+#endif
+}
+
+template <typename T>
+class PinnedVector {
+  static size_t calculateMinSize(size_t init_size) {
+    return max<size_t>(getpagesize(), align_up<size_t>(init_size * sizeof(T), getpagesize()));
+  }
+public:
+#if 0
+  PinnedVector(): size(0), map_length(getpagesize()),
+                  data(static_cast<T *>(safestack::Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0))) {
+    FPS_CHECK(data);
+  }
+#endif
+
+  PinnedVector(size_t init_size):
+      size(init_size), map_length(calculateMinSize(init_size)),
+      data(static_cast<T *>(safestack::Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0))) {
+    FPS_CHECK(data != MAP_FAILED);
+    for (size_t i = 0; i < size; ++i) {
+      new (&data[i]) T();
+      assert(data[i]);
+    }
+  }
+
+  size_t insert(T &&x) {
+    T *item = get_unused();
+    *item = static_cast<T &&>(x);
+    return item - data;
+  }
+
+  T *getData() const {
+    return data;
+  }
+
+  T &operator[](size_t index) {
+    assert(index < size);
+    return data[index];
+  }
+
+private:
+  size_t size;
+  size_t map_length;
+  T * const data;
+
+
+  void grow() {
+    // Extend mapping by one page.
+    const size_t new_map_length = map_length + getpagesize();
+    void *new_data = Mremap(data, map_length, new_map_length, 0);
+    FPS_CHECK(new_data == data);
+    map_length = new_map_length;
+  }
+
+  T *get_unused() {
+    // Try to allocate an already-constructed but invalidated entry.
+    for (size_t i = 0; i < size; ++i) {
+      T *x = &data[i];
+      if (!*x)
+        return x;
+    }
+
+    // Grow the map if necessary.
+    while ((size + 1) * sizeof(T) > map_length)
+      grow();
+
+    // Construct a new entry.
+    T *x = &data[size++];
+    new (x) T();
+    return x;
+  }
+};
+
+}
+
