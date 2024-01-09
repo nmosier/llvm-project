@@ -140,6 +140,7 @@ __attribute__((constructor(0))) void init_main_thread() {
   FPS_CHECK(threads);
   new (threads) thread_ll(num_stacks);
   __fps_thdstacks = threads->stacks.getData();
+  fprintf(stderr, "__fps_thdstacks = %p\n", __fps_thdstacks);
 }
 
 // NHM-FIXME: Needs to take size arguments.

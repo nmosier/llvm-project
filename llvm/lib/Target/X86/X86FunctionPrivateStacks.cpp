@@ -32,8 +32,7 @@ public:
 private:
   const TargetMachine *TM;
   const TargetInstrInfo *TII;
-  const GlobalValue *StackPtrSym;
-  const GlobalValue *StackBaseSym;
+  const GlobalValue *ThreadLocalStackVecSym;
 
   bool needsFarTLS() const {
     return TM->getCodeModel() == CodeModel::Medium || TM->getCodeModel() == CodeModel::Large;
@@ -75,12 +74,35 @@ bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, Machin
   return true;
 }
 
+#if 0
 void X86FunctionPrivateStacks::loadPrivateStackPointerAndBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc& Loc) {
   loadPrivateStackPointer(MBB, MBBI, Loc);
   loadPrivateStackBase(MBB, MBBI, Loc);
 }
+#endif
 
 void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc) {
+  // For now, assume local dynamic.
+  // TO_DTPOFF
+#if 0
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64ri32), X86::RBX)
+      .addGlobalAddress(ThreadLocalStackVecSym, 0, X86II::MO_DTPOFF);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
+      .addReg(X86::RBX)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::FS);
+#else
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
+      .addReg(X86::NoRegister)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addGlobalAddress(ThreadLocalStackVecSym, 0, X86II::MO_DTPOFF)
+      .addReg(X86::FS);
+#endif
+
+#if 0
   // NHM-FIXME: add MachineMemOperand.
   if (needsFarTLS()) {
     // MOVABS rbx, __fps_stackptr
@@ -105,8 +127,10 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, M
         .addGlobalAddress(StackPtrSym, 0, X86II::MO_TPOFF)
         .addReg(X86::FS);
   }
+#endif
 }
 
+#if 0
 void X86FunctionPrivateStacks::loadPrivateStackBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc) {
   if (needsFarTLS()) {
     // MOVABS r15, __fps_stack
@@ -114,7 +138,9 @@ void X86FunctionPrivateStacks::loadPrivateStackBase(MachineBasicBlock &MBB, Mach
         .addGlobalAddress(StackBaseSym, 0, X86II::MO_TPOFF);
   }
 }
+#endif
 
+#if 0
 void X86FunctionPrivateStacks::storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc) {
   // NHM-FIXME: Add machinememoperand.
   if (needsFarTLS()) {
@@ -140,13 +166,11 @@ void X86FunctionPrivateStacks::storePrivateStackPointer(MachineBasicBlock &MBB, 
         .addReg(X86::RBX);
   }
 }
+#endif
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   if (!EnableFunctionPrivateStacks)
     return false;
-
-#warning REMOVE THIS
-  return false;
 
   TM = &MF.getTarget();
 
@@ -167,81 +191,88 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   assert(!MFI.hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
 
 
-  StackPtrSym = M.getNamedValue(StringRef(("__fps_stackptr_" + MF.getName()).str()));
-  StackBaseSym = M.getNamedValue(StringRef(("__fps_stack_" + MF.getName()).str()));
-  assert(StackPtrSym && StackBaseSym && "Stack pointer or base global variable missing!");
-  assert(StackPtrSym->isThreadLocal() && StackPtrSym->getThreadLocalMode() == GlobalVariable::LocalExecTLSModel && "Stack pointer is not local-exec TLS model!");
-  assert(StackBaseSym->isThreadLocal() && StackBaseSym->getThreadLocalMode() == GlobalVariable::LocalExecTLSModel && "Stack base is not local-exec TLS model!");
+  ThreadLocalStackVecSym = M.getNamedValue("__fps_thdstacks");
+  // NHM-FIXME: Assertions.
 
   DebugLoc Loc;
 
   uint64_t PrivateFrameSize = 0;
-  if (false) { 
-    DenseMap<int, uint64_t> ObjIdxToOff;
-    for (int FI = MFI.getObjectIndexBegin(); FI < MFI.getObjectIndexEnd(); ++FI) {
-      if (MFI.isFixedObjectIndex(FI))
-        continue;
-      SmallVector<MachineOperand *> Uses;
-      if (!frameIndexOnlyUsedInMemoryOperands(FI, MF, Uses)) {
-        LLVM_DEBUG(dbgs() << "skipping frame index " << FI << " which has a non-memory-operand use\n");
-        continue;
-      }
-
-      const auto PrivateFrameOffset = PrivateFrameSize;
-      PrivateFrameSize += MFI.getObjectSize(FI);
-
-      // Move uses to safe stack.
-      for (MachineOperand *UseOp : Uses) {
-        // Orig:
-        //   LEA r1, [FrameIndex + scale*r2 + disp]
-        // Rewritten (small code):
-        //   LEA r1, [rbx + scale*r2 + disp+PrivateFrameOffset+TLSOffset]
-        //   ADD r1, fs:[0] # NOTE: this only works if EFLAGS is not live. 
-        // Rewritten (large code):
-        //   LEA r1, [rbx + scale*r2 + disp+PrivateFrameOffset]
-        //   ADD r1, fs:[0]
-        //   ADD r1, TLSOffset
-      
-        MachineInstr *MI = UseOp->getParent();
-        const unsigned MemRefIdxBegin = UseOp->getOperandNo() - X86::AddrBaseReg;
-        MachineOperand &BaseOp = MI->getOperand(MemRefIdxBegin + X86::AddrBaseReg);
-        MachineOperand &ScaleOp = MI->getOperand(MemRefIdxBegin + X86::AddrScaleAmt);
-        MachineOperand &IndexOp = MI->getOperand(MemRefIdxBegin + X86::AddrIndexReg);
-        MachineOperand &DispOp = MI->getOperand(MemRefIdxBegin + X86::AddrDisp);
-        MachineOperand &SegmentOp = MI->getOperand(MemRefIdxBegin + X86::AddrSegmentReg);
-
-        if (needsFarTLS()) {
-          report_fatal_error("large code not supported yet");
-        } else {
-          BaseOp.ChangeToRegister(X86::RBX, /*isDef*/false);
-          DispOp.ChangeToGA(StackBaseSym, DispOp.getImm() + PrivateFrameOffset, X86II::MO_TPOFF);
-
-          switch (MI->getOpcode()) {
-          case X86::LEA64r:
-            BuildMI(*MI->getParent(), std::next(MI->getIterator()), Loc, TII->get(X86::ADD64rm), MI->getOperand(0).getReg())
-                .addReg(X86::NoRegister)
-                .addImm(1)
-                .addReg(X86::NoRegister)
-                .addImm(0)
-                .addReg(X86::FS);
-            break;
-
-          case X86::LEA32r:
-          case X86::LEA16r:
-            report_fatal_error("Unexpected 16- or 32-bit LEA with frame index operand");
-
-          default:
-            SegmentOp.setReg(X86::FS);
-            break;
-          }
-        }
-      
-      }
-    
+#if 0
+  DenseMap<int, uint64_t> ObjIdxToOff;
+  for (int FI = MFI.getObjectIndexBegin(); FI < MFI.getObjectIndexEnd(); ++FI) {
+    if (MFI.isFixedObjectIndex(FI))
+      continue;
+    SmallVector<MachineOperand *> Uses;
+    if (!frameIndexOnlyUsedInMemoryOperands(FI, MF, Uses)) {
+      LLVM_DEBUG(dbgs() << "skipping frame index " << FI << " which has a non-memory-operand use\n");
+      continue;
     }
+
+    const auto PrivateFrameOffset = PrivateFrameSize;
+    PrivateFrameSize += MFI.getObjectSize(FI);
+
+    // Move uses to safe stack.
+    for (MachineOperand *UseOp : Uses) {
+      // Orig:
+      //   LEA r1, [FrameIndex + scale*r2 + disp]
+      // Rewritten (small code):
+      //   LEA r1, [rbx + scale*r2 + disp+PrivateFrameOffset+TLSOffset]
+      //   ADD r1, fs:[0] # NOTE: this only works if EFLAGS is not live. 
+      // Rewritten (large code):
+      //   LEA r1, [rbx + scale*r2 + disp+PrivateFrameOffset]
+      //   ADD r1, fs:[0]
+      //   ADD r1, TLSOffset
+      
+      MachineInstr *MI = UseOp->getParent();
+      const unsigned MemRefIdxBegin = UseOp->getOperandNo() - X86::AddrBaseReg;
+      MachineOperand &BaseOp = MI->getOperand(MemRefIdxBegin + X86::AddrBaseReg);
+      MachineOperand &ScaleOp = MI->getOperand(MemRefIdxBegin + X86::AddrScaleAmt);
+      MachineOperand &IndexOp = MI->getOperand(MemRefIdxBegin + X86::AddrIndexReg);
+      MachineOperand &DispOp = MI->getOperand(MemRefIdxBegin + X86::AddrDisp);
+      MachineOperand &SegmentOp = MI->getOperand(MemRefIdxBegin + X86::AddrSegmentReg);
+
+      if (needsFarTLS()) {
+        report_fatal_error("large code not supported yet");
+      } else {
+        BaseOp.ChangeToRegister(X86::RBX, /*isDef*/false);
+        DispOp.ChangeToGA(StackBaseSym, DispOp.getImm() + PrivateFrameOffset, X86II::MO_TPOFF);
+
+        switch (MI->getOpcode()) {
+        case X86::LEA64r:
+          BuildMI(*MI->getParent(), std::next(MI->getIterator()), Loc, TII->get(X86::ADD64rm), MI->getOperand(0).getReg())
+              .addReg(X86::NoRegister)
+              .addImm(1)
+              .addReg(X86::NoRegister)
+              .addImm(0)
+              .addReg(X86::FS);
+          break;
+
+        case X86::LEA32r:
+        case X86::LEA16r:
+          report_fatal_error("Unexpected 16- or 32-bit LEA with frame index operand");
+
+        default:
+          SegmentOp.setReg(X86::FS);
+          break;
+        }
+      }
+      
+    }
+    
   }
+#endif
 
 
+
+
+  MachineBasicBlock &EntryMBB = MF.front();
+  MachineBasicBlock::iterator EntryMBBI = EntryMBB.begin();
+
+  loadPrivateStackPointer(EntryMBB, EntryMBBI);
+  
+
+
+#if 0
   MachineBasicBlock &EntryMBB = MF.front();
   MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
   MF.push_front(&AllocMBB);
@@ -374,6 +405,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
         loadPrivateStackPointerAndBase(*Succ, Succ->begin());
     else
       loadPrivateStackPointerAndBase(*Clobber->getParent(), std::next(Clobber->getIterator()));
+#endif
 
 #if 0
   // Reload at the target of EH_SjLj_Setup instructions.
