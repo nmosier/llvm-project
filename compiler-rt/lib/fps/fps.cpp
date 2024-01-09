@@ -1,6 +1,7 @@
 #include "interception/interception.h"
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include "safestack/safestack_util.h"
 #include "safestack/safestack_platform.h"
 #include "fps/fps_util.h"
@@ -9,7 +10,7 @@ namespace fps {
 namespace {
 
 /// Default size of function-private stacks.
-const unsigned kDefaultFPSSize = 0x10000;
+const unsigned kDefaultFPSSize = 0x80000;
 const unsigned kGuardSize = getpagesize();
 
 #if 0
@@ -232,7 +233,7 @@ public:
     stacksizes[index] = stacksize;
     stackbases[index] = stackbase;
     stackptrs[index] = static_cast<char *>(stackbase) + stacksize;
-    fprintf(stderr, "[fps] allocated stack @ %p\n", stackbase);
+    FPS_LOG("allocated stack at %p", stackbase);
   }
 
   void deallocateStack(size_t index) {
@@ -263,6 +264,8 @@ size_t getUnusedIndex() {
       return i;
   for (Thread *thread = threads; thread; thread = thread->getNext())
     thread->grow();
+  map_length += getpagesize();
+  assert(i < getVecSize());
   return i;
 }
 
@@ -272,12 +275,15 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack() {
   const size_t guardsize = getpagesize(); // NHM-FIXME
   for (Thread *thread = threads; thread; thread = thread->getNext())
     thread->allocateStack(index, stacksize, guardsize);
-  return index * 8; // NHM-FIXME
+  FPS_LOG("registered index %" PRIu64, index);
+  return index * sizeof(void *); // NHM-FIXME
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index) {
+  index /= sizeof(void *); // NHM-FIXME
   for (Thread *thread = threads; thread; thread = thread->getNext())
     thread->deallocateStack(index);
+  FPS_LOG("deregistered index %" PRIu64, index);
 }
 
 

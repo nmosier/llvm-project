@@ -14,6 +14,6 @@ foreach(arch ${FPS_SUPPORTED_ARCH})
     ARCHS ${arch}
     SOURCES ${FPS_SOURCES}
             $<TARGET_OBJECTS:RTInterception.${arch}> # TODO: Not sure if this is needed
-    CFLAGS ${FPS_CFLAGS}
+    CFLAGS ${FPS_CFLAGS} -O0 -g
     PARENT_TARGET fps)
 endforeach()

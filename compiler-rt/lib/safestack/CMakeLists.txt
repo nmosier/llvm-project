@@ -14,6 +14,6 @@ foreach(arch ${SAFESTACK_SUPPORTED_ARCH})
     ARCHS ${arch}
     SOURCES ${SAFESTACK_SOURCES}
             $<TARGET_OBJECTS:RTInterception.${arch}>
-    CFLAGS ${SAFESTACK_CFLAGS} -mcmodel=large
+    CFLAGS ${SAFESTACK_CFLAGS}
     PARENT_TARGET safestack)
 endforeach()

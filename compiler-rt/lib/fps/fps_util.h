@@ -15,6 +15,16 @@
     }                                                           \
   } while (false)
 
+#define FPS_LOGGING 0
+#if FPS_LOGGING
+# define FPS_LOG(...)                            \
+  do {                                          \
+    fprintf(stderr, __VA_ARGS__);               \
+    fprintf(stderr, "\n");                      \
+  } while (false)
+#else
+# define FPS_LOG(...) do {} while (false)
+#endif
 
 inline void *operator new(size_t count, void *here) { return here; }
 

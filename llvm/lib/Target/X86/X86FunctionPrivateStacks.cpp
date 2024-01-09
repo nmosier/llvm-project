@@ -85,17 +85,6 @@ void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, Machi
       .addReg(X86::NoRegister)
       .addGlobalAddress(StackIdxSym)
       .addReg(X86::NoRegister);
-#if 0
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::SHL64ri), Reg)
-      .addReg(Reg)
-      .addImm(3);
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::LEA64r), Reg)
-      .addReg(Reg)
-      .addImm(2)
-      .addReg(Reg)
-      .addImm(0)
-      .addReg(X86::NoRegister);
-#endif
   BuildMI(MBB, MBBI, Loc, TII->get(X86::ADD64rm), Reg)
       .addReg(Reg)
       .addReg(X86::NoRegister)
@@ -104,44 +93,6 @@ void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, Machi
       .addGlobalAddress(Member, 0, X86II::MO_DTPOFF)
       .addReg(X86::FS);
 }
-
-#if 0
-void X86FunctionPrivateStacks::loadPrivateStackBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc) {
-  if (needsFarTLS()) {
-    // MOVABS r15, __fps_stack
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64ri), X86::R15)
-        .addGlobalAddress(StackBaseSym, 0, X86II::MO_TPOFF);
-  }
-}
-#endif
-
-#if 0
-void X86FunctionPrivateStacks::storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc) {
-  // NHM-FIXME: Add machinememoperand.
-  if (needsFarTLS()) {
-    // MOVABS r15, __fps_stackptr
-    // MOV fs:[r15], rbx
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64ri), X86::R15)
-        .addGlobalAddress(StackPtrSym, 0, X86II::MO_TPOFF);
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64mr))
-        .addReg(X86::R15)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(0)
-        .addReg(X86::FS)
-        .addReg(X86::RBX);
-  } else {
-    // MOV fs:[__fps_stackptr], rbx
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64mr))
-        .addReg(X86::NoRegister)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addGlobalAddress(StackPtrSym, 0, X86II::MO_TPOFF)
-        .addReg(X86::FS)
-        .addReg(X86::RBX);
-  }
-}
-#endif
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   if (!EnableFunctionPrivateStacks || MF.getName().startswith("__fps_"))
@@ -174,7 +125,6 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   DebugLoc Loc;
 
   uint64_t PrivateFrameSize = 0;
-#if 0
   DenseMap<int, uint64_t> ObjIdxToOff;
   for (int FI = MFI.getObjectIndexBegin(); FI < MFI.getObjectIndexEnd(); ++FI) {
     if (MFI.isFixedObjectIndex(FI))
@@ -188,6 +138,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     const auto PrivateFrameOffset = PrivateFrameSize;
     PrivateFrameSize += MFI.getObjectSize(FI);
 
+#if 0
     // Move uses to safe stack.
     for (MachineOperand *UseOp : Uses) {
       // Orig:
@@ -235,12 +186,12 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       }
       
     }
+#endif
     
   }
-#endif
 
 
-
+  // PROLOGUE: Private stack frame setup on function entry.
   MachineBasicBlock &EntryMBB = MF.front();
   MachineBasicBlock::iterator EntryMBBI = EntryMBB.begin();
 
@@ -260,7 +211,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       .addReg(X86::R15)
       .addImm(1)
       .addReg(X86::NoRegister)
-      .addImm(16)
+      .addImm(0)
       .addReg(X86::NoRegister)
       .addReg(X86::RBX);
   // NHM-TEST:
@@ -268,9 +219,51 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       .addReg(X86::RBX)
       .addImm(1)
       .addReg(X86::NoRegister)
-      .addImm(0)
+      .addImm(-8)
       .addReg(X86::NoRegister)
       .addImm(0x42);
+
+  // POST-CALL: Reload the private stack pointer after any indirect control-flow targets (ICTs).
+  SmallVector<MachineInstr *> ICTs;
+  SmallVector<MachineInstr *> Exits;
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineInstr &MI : MBB) {
+      if ((MI.isCall() && !MI.isTerminator()) ||
+          ((MI.getOpcode() == X86::ENDBR32 || MI.getOpcode() == X86::ENDBR64) && &MBB != &MF.front())) {
+        ICTs.push_back(&MI);
+      }
+      if (MI.isReturn())
+        Exits.push_back(&MI);
+    }
+  }
+  for (MachineInstr *ICT : ICTs) {
+    MachineBasicBlock &MBB = *ICT->getParent();
+    const MachineBasicBlock::iterator MBBI = std::next(ICT->getIterator());
+    getPointerToFPSData(MBB, MBBI, Loc, ThdStackPtrsSym, X86::RBX);
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
+        .addReg(X86::RBX)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+  }
+
+  // EPILOGUE: Add back frame size.
+  for (MachineInstr *Exit : Exits) {
+    MachineBasicBlock &MBB = *Exit->getParent();
+    const MachineBasicBlock::iterator MBBI = Exit->getIterator();
+    getPointerToFPSData(MBB, MBBI, Loc, ThdStackPtrsSym, X86::R15);
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::ADD64ri32), X86::RBX)
+        .addReg(X86::RBX)
+        .addImm(PrivateFrameSize);
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64mr))
+        .addReg(X86::R15)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister)
+        .addReg(X86::RBX);
+  }
   
 #if 0
   MachineBasicBlock &EntryMBB = MF.front();
