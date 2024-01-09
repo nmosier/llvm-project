@@ -30,7 +30,7 @@ T align_up(T n, T align) {
   return ((n + (align - 1)) / align) * align;
 }
 
-inline void *Mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address = nullptr) {
+inline void *Mremap(void *old_address, size_t old_size, size_t new_size, int flags = 0, void *new_address = nullptr) {
 #if SANITIZER_NETBSD
   return __mremap(old_address, old_size, new_size, flags, new_address);
 #elif SANITIZER_FREEBSD && (defined(__aarch64__) || defined(__x86_64__))

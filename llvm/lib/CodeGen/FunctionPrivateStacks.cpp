@@ -26,7 +26,6 @@ class FunctionPrivateStacks {
   LLVMContext &Ctx;
   bool Changed;
   IntegerType *Int64Ty;
-  GlobalVariable *StackVecVar;
   FunctionCallee RegStack;
   FunctionCallee DeregStack;
   
@@ -55,7 +54,9 @@ bool FunctionPrivateStacks::run() {
   Int64Ty = IntegerType::get(Ctx, 64);
     
   // Declare thread-local variable.
-  StackVecVar = new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thdstacks");
+  new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stackptrs");
+  new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stackbases");
+  new GlobalVariable(M, IntegerType::get(Ctx, 64), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stacksizes");
 
   auto *CtorTy = FunctionType::get(Type::getVoidTy(Ctx), {}, /*isVarArg*/false);
   auto *Ctor = Function::Create(CtorTy, Function::PrivateLinkage, "__fps_regstack_ctor", M);

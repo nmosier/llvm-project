@@ -32,19 +32,21 @@ public:
 private:
   const TargetMachine *TM;
   const TargetInstrInfo *TII;
-  const GlobalValue *ThreadLocalStackVecSym;
+  const GlobalValue *StackIdxSym;
+  const GlobalValue *ThdStackPtrsSym;
 
   bool needsFarTLS() const {
     return TM->getCodeModel() == CodeModel::Medium || TM->getCodeModel() == CodeModel::Large;
   }
 
+  void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalValue *Member, Register Reg);
   void loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
-  void loadPrivateStackBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
-  void loadPrivateStackPointerAndBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
 
   bool frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses);
 };
+
+
 
 bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
   for (MachineBasicBlock &MBB : MF) {
@@ -74,60 +76,33 @@ bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, Machin
   return true;
 }
 
-#if 0
-void X86FunctionPrivateStacks::loadPrivateStackPointerAndBase(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc& Loc) {
-  loadPrivateStackPointer(MBB, MBBI, Loc);
-  loadPrivateStackBase(MBB, MBBI, Loc);
-}
-#endif
-
-void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc) {
-  // For now, assume local dynamic.
-  // TO_DTPOFF
-#if 0
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64ri32), X86::RBX)
-      .addGlobalAddress(ThreadLocalStackVecSym, 0, X86II::MO_DTPOFF);
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
-      .addReg(X86::RBX)
+void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalValue *Member, Register Reg) {
+  // MOV reg, [__fps_stackidx_<fn>] // NOTE: We should have already pre-scaled this in the FPS sanitizer runtime.
+  // ADD reg, fs:[dtpoff(__fps_thd_stack<memb>)]
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
+      .addReg(X86::RIP)
       .addImm(1)
       .addReg(X86::NoRegister)
+      .addGlobalAddress(StackIdxSym)
+      .addReg(X86::NoRegister);
+#if 0
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::SHL64ri), Reg)
+      .addReg(Reg)
+      .addImm(3);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::LEA64r), Reg)
+      .addReg(Reg)
+      .addImm(2)
+      .addReg(Reg)
       .addImm(0)
-      .addReg(X86::FS);
-#else
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
+      .addReg(X86::NoRegister);
+#endif
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::ADD64rm), Reg)
+      .addReg(Reg)
       .addReg(X86::NoRegister)
       .addImm(1)
       .addReg(X86::NoRegister)
-      .addGlobalAddress(ThreadLocalStackVecSym, 0, X86II::MO_DTPOFF)
+      .addGlobalAddress(Member, 0, X86II::MO_DTPOFF)
       .addReg(X86::FS);
-#endif
-
-#if 0
-  // NHM-FIXME: add MachineMemOperand.
-  if (needsFarTLS()) {
-    // MOVABS rbx, __fps_stackptr
-    // MOV rbx, fs[rbx]
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64ri), X86::RBX)
-        .addGlobalAddress(StackPtrSym, 0, X86II::MO_TPOFF);
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
-        .addReg(X86::RBX)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(0)
-        .addReg(X86::FS);
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64ri), X86::R15)
-        .addGlobalAddress(StackPtrSym, 0, X86II::MO_TPOFF);
-    // NHM-FIXME: MEmory operand.
-  } else {
-    // MOV rbx, fs[__fps_stackptr]
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
-        .addReg(X86::NoRegister)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addGlobalAddress(StackPtrSym, 0, X86II::MO_TPOFF)
-        .addReg(X86::FS);
-  }
-#endif
 }
 
 #if 0
@@ -169,7 +144,7 @@ void X86FunctionPrivateStacks::storePrivateStackPointer(MachineBasicBlock &MBB, 
 #endif
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
-  if (!EnableFunctionPrivateStacks)
+  if (!EnableFunctionPrivateStacks || MF.getName().startswith("__fps_"))
     return false;
 
   TM = &MF.getTarget();
@@ -191,7 +166,9 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   assert(!MFI.hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
 
 
-  ThreadLocalStackVecSym = M.getNamedValue("__fps_thdstacks");
+  StackIdxSym = M.getNamedValue(("__fps_stackidx_" + MF.getName()).str());
+  ThdStackPtrsSym = M.getNamedValue("__fps_thd_stackptrs");
+  assert(StackIdxSym && ThdStackPtrsSym);
   // NHM-FIXME: Assertions.
 
   DebugLoc Loc;
@@ -264,14 +241,37 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
 
 
-
   MachineBasicBlock &EntryMBB = MF.front();
   MachineBasicBlock::iterator EntryMBBI = EntryMBB.begin();
 
-  loadPrivateStackPointer(EntryMBB, EntryMBBI);
+  getPointerToFPSData(EntryMBB, EntryMBBI, Loc, ThdStackPtrsSym, X86::R15);
+  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
+      .addReg(X86::R15)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::NoRegister);
+  // NHM-NOTE: Could also just sub from memory directly using SUB64mi32. Saves opcode bytes maybe + registers.
+  // NHM-FIXME: Be smart about 8/32.
+  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::SUB64ri32), X86::RBX)
+      .addReg(X86::RBX)
+      .addImm(PrivateFrameSize);
+  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64mr))
+      .addReg(X86::R15)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(16)
+      .addReg(X86::NoRegister)
+      .addReg(X86::RBX);
+  // NHM-TEST:
+  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64mi32))
+      .addReg(X86::RBX)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::NoRegister)
+      .addImm(0x42);
   
-
-
 #if 0
   MachineBasicBlock &EntryMBB = MF.front();
   MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();

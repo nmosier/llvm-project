@@ -120,8 +120,13 @@ struct FunctionPrivateStack {
   }
 };
 
+size_t map_length = 0;
 
-static size_t num_stacks = 0;
+size_t getVecSize() {
+  return map_length / sizeof(void *);
+}
+
+#if 0
 
 extern "C" __attribute__((visibility("default"))) thread_local FunctionPrivateStack *__fps_thdstacks = nullptr;
 
@@ -167,6 +172,115 @@ extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t
     thread->stacks[index].deallocate();
   }
 }
+
+#endif
+
+
+
+
+extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackptrs = nullptr;
+extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackbases = nullptr;
+extern "C" __attribute__((visibility("default"))) thread_local uint64_t *__fps_thd_stacksizes = nullptr;
+
+class Thread {
+private:
+  void ** const stackptrs;
+  void ** const stackbases;
+  uintptr_t * const stacksizes;
+  Thread *next;
+
+  static_assert(sizeof *stackptrs == sizeof *stackbases, ""); // NHM-FIXME
+  static_assert(sizeof *stackptrs == sizeof *stacksizes, ""); // NHM-FIXME
+
+  static size_t CalculateMinSize(size_t num_stacks) {
+    return align_up<size_t>(max<size_t>(1, num_stacks * sizeof(void *)), getpagesize());
+  }
+
+  template <typename T>
+  T *CreateNewMap() {
+    static_assert(sizeof(T) == sizeof(void *), "");
+    assert(map_length % sizeof(T) == 0);
+    T *map = static_cast<T *>(safestack::Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+    FPS_CHECK(map != MAP_FAILED);
+    return map;
+  }
+
+  static void growOne(void *map) {
+    void *new_map = Mremap(map, map_length, map_length + getpagesize());
+    FPS_CHECK(new_map == map);
+  }
+
+public:
+
+  Thread(Thread *next = nullptr): stackptrs(CreateNewMap<void *>()), stackbases(CreateNewMap<void *>()), stacksizes(CreateNewMap<uintptr_t>()) {
+    __fps_thd_stackptrs = stackptrs;
+    __fps_thd_stackbases = stackbases;
+    __fps_thd_stacksizes = stacksizes;
+  }
+
+  void grow() {
+    growOne(stackptrs);
+    growOne(stackbases);
+    growOne(stacksizes);
+  }
+
+  void allocateStack(size_t index, size_t stacksize, size_t guardsize) {
+    assert(index < getVecSize());
+    // NHM-FIXME: Do guard.
+    void *stackbase = safestack::Mmap(nullptr, stacksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    FPS_CHECK(stackbase != MAP_FAILED);
+    stacksizes[index] = stacksize;
+    stackbases[index] = stackbase;
+    stackptrs[index] = static_cast<char *>(stackbase) + stacksize;
+    fprintf(stderr, "[fps] allocated stack @ %p\n", stackbase);
+  }
+
+  void deallocateStack(size_t index) {
+    assert(index < getVecSize());
+    assert(stacksizes[index] > 0);
+    safestack::Munmap(nullptr, stacksizes[index]);
+    stacksizes[index] = 0;
+    stackbases[index] = nullptr;
+    stackptrs[index] = nullptr;
+  }
+
+  Thread *getNext() const {
+    return next;
+  }
+};
+
+Thread *threads = nullptr;
+
+__attribute__((constructor(0))) void init_main_thread() {
+  map_length = getpagesize(); // NHM-FIXME: Maybe hard-code it instead?
+  threads = new (malloc(sizeof(Thread))) Thread();
+}
+
+size_t getUnusedIndex() {
+  size_t i;
+  for (i = 0; i < getVecSize(); ++i)
+    if (!__fps_thd_stackptrs[i])
+      return i;
+  for (Thread *thread = threads; thread; thread = thread->getNext())
+    thread->grow();
+  return i;
+}
+
+extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack() {
+  const size_t index = getUnusedIndex();
+  const size_t stacksize = kDefaultFPSSize;
+  const size_t guardsize = getpagesize(); // NHM-FIXME
+  for (Thread *thread = threads; thread; thread = thread->getNext())
+    thread->allocateStack(index, stacksize, guardsize);
+  return index * 8; // NHM-FIXME
+}
+
+extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index) {
+  for (Thread *thread = threads; thread; thread = thread->getNext())
+    thread->deallocateStack(index);
+}
+
+
 
 }
 }
