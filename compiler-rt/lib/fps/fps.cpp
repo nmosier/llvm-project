@@ -1,4 +1,3 @@
-#include "interception/interception.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -308,7 +307,16 @@ void *thread_start(void *arg) {
   return thd_info->start_routine(thd_info->arg);
 }
 
-extern "C" int __fps_wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg) {
+extern "C" __attribute__((weak, alias("__interceptor_pthread_create"), visibility("default"))) int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+
+extern "C" __attribute__((weak, visibility("default"))) int ___interceptor_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg) {
+  typedef int pthread_create_t(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+  pthread_create_t *sym = (pthread_create_t *) dlsym(RTLD_NEXT, "pthread_create");
+  FPS_CHECK(sym);
+  return sym(thread, attr, start_routine, arg);
+}
+
+extern "C" __attribute__((visibility("default"))) int __interceptor_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg)  {
   FPS_LOG("[fps] intercepted pthread_create");
 
   size_t size = kDefaultFPSSize;
@@ -327,7 +335,7 @@ extern "C" int __fps_wrap_pthread_create(pthread_t *thread, const pthread_attr_t
   struct tinfo *thd_info_ptr = (struct tinfo *) malloc(sizeof thd_info); // NHM-FIXME
   *thd_info_ptr = thd_info;
 
-  return pthread_create(thread, attr, thread_start, thd_info_ptr);
+  return ___interceptor_pthread_create(thread, attr, thread_start, thd_info_ptr);
 }
 
 

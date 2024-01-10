@@ -87,7 +87,9 @@ bool FunctionPrivateStacks::run() {
   appendToGlobalCtors(M, Ctor, 0);
   appendToGlobalDtors(M, Dtor, 0);
 
+#if 0
   interceptPthreadCreate();
+#endif
   
   return Changed;
 }
