@@ -30,6 +30,7 @@ class FunctionPrivateStacks {
   FunctionCallee DeregStack;
   
   void runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRBuilder<> &DtorIRB);
+  void interceptPthreadCreate();
   
 public:
   FunctionPrivateStacks(Module &M) : M(M), Ctx(M.getContext()), Changed(false) {}
@@ -48,6 +49,15 @@ void FunctionPrivateStacks::runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRB
 
   // Deregister stack.
   DtorIRB.CreateCall(DeregStack, {DtorIRB.CreateLoad(Int64Ty, StackIdxVar)});
+}
+
+void FunctionPrivateStacks::interceptPthreadCreate() {
+  Function *PthreadCreate = M.getFunction("pthread_create");
+  if (!PthreadCreate)
+    return;
+  Function *WrapPthreadCreate = Function::Create(PthreadCreate->getFunctionType(), Function::ExternalLinkage, "__fps_wrap_pthread_create", M);
+  PthreadCreate->replaceAllUsesWith(WrapPthreadCreate);
+  PthreadCreate->eraseFromParent();
 }
 
 bool FunctionPrivateStacks::run() {
@@ -76,6 +86,8 @@ bool FunctionPrivateStacks::run() {
 
   appendToGlobalCtors(M, Ctor, 0);
   appendToGlobalDtors(M, Dtor, 0);
+
+  interceptPthreadCreate();
   
   return Changed;
 }

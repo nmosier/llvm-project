@@ -20,7 +20,6 @@
 #include <sys/resource.h>
 
 #include "interception/interception.h"
-#include "sanitizer_common/sanitizer_pthread.h"
 
 using namespace safestack;
 
@@ -205,9 +204,6 @@ void thread_cleanup_handler(void *_iter) {
 
 void EnsureInterceptorsInitialized();
 
-extern "C" void __safestack_extra_interceptor_pthread_create();
-
-#if 0
 /// Intercept thread creation operation to allocate and setup the unsafe stack
 INTERCEPTOR(int, pthread_create, pthread_t *thread,
             const pthread_attr_t *attr,
@@ -215,8 +211,6 @@ INTERCEPTOR(int, pthread_create, pthread_t *thread,
   EnsureInterceptorsInitialized();
   size_t size = 0;
   size_t guard = 0;
-
-  fprintf(stderr, "HERE: %s\n", __FILE__);
 
   if (attr) {
     pthread_attr_getstacksize(attr, &size);
@@ -260,49 +254,6 @@ void EnsureInterceptorsInitialized() {
 
   interceptors_inited = true;
 }
-
-#else
-void pthread_create_callback(pthread_t *thread, const pthread_attr_t *attr, void *(*&start_routine)(void *), void *&arg) {
-  // fprintf(stderr, "[safe-stack] instrumenting pthread_create\n");
-
-  size_t size = 0;
-  size_t guard = 0;
-
-  if (attr) {
-    pthread_attr_getstacksize(attr, &size);
-    pthread_attr_getguardsize(attr, &guard);
-  } else {
-    // get pthread default stack size
-    pthread_attr_t tmpattr;
-    pthread_attr_init(&tmpattr);
-    pthread_attr_getstacksize(&tmpattr, &size);
-    pthread_attr_getguardsize(&tmpattr, &guard);
-    pthread_attr_destroy(&tmpattr);
-  }
-
-  SFS_CHECK(size);
-  size = RoundUpTo(size, kStackAlign);
-
-  void *addr = unsafe_stack_alloc(size, guard);
-  // Put tinfo at the end of the buffer. guard may be not page aligned.
-  // If that is so then some bytes after addr can be mprotected.
-  struct tinfo *tinfo =
-      (struct tinfo *)(((char *)addr) + size - sizeof(struct tinfo));
-  tinfo->start_routine = start_routine;
-  tinfo->start_routine_arg = arg;
-  tinfo->unsafe_stack_start = addr;
-  tinfo->unsafe_stack_size = size;
-  tinfo->unsafe_stack_guard = guard;
-
-  start_routine = &thread_start;
-  arg = tinfo;
-}
-__interception::pthread_create_interceptor_t pthread_create_interceptor = {.callback = pthread_create_callback, .next = nullptr};
-__attribute__((constructor(0))) void register_pthread_create_interceptor() {
-  __interception::intercept_pthread_create(&pthread_create_interceptor);
-}
-#endif
-
 
 }  // namespace
 

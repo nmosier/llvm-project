@@ -13,8 +13,6 @@ foreach(arch ${FPS_SUPPORTED_ARCH})
     STATIC
     ARCHS ${arch}
     SOURCES ${FPS_SOURCES}
-    # $<TARGET_OBJECTS:RTInterception.${arch}> # TODO: Not sure if this is needed
-    OBJECT_LIBS RTInterception RTSanitizerCommon RTSanitizerCommonLibc
     CFLAGS ${FPS_CFLAGS} -O0 -g
     PARENT_TARGET fps)
 endforeach()

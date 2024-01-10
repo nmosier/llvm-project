@@ -5,7 +5,6 @@
 #include "safestack/safestack_util.h"
 #include "safestack/safestack_platform.h"
 #include "fps/fps_util.h"
-#include "sanitizer_common/sanitizer_pthread.h"
 
 namespace fps {
 namespace {
@@ -309,8 +308,8 @@ void *thread_start(void *arg) {
   return thd_info->start_routine(thd_info->arg);
 }
 
-void pthread_create_callback(pthread_t *thread, const pthread_attr_t *attr, void *(*&start_routine)(void *), void *&arg) {
-  FPS_LOG("[fps] instrumenting pthread_create");
+extern "C" int __fps_wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg) {
+  FPS_LOG("[fps] intercepted pthread_create");
 
   size_t size = kDefaultFPSSize;
   size_t guard = getpagesize(); // NHM-FIXME
@@ -325,18 +324,10 @@ void pthread_create_callback(pthread_t *thread, const pthread_attr_t *attr, void
   }
 
   struct tinfo thd_info = {.thread = new_thread, .start_routine = start_routine, .arg = arg};
-  struct tinfo *thd_info_ptr = (struct tinfo *) malloc(sizeof thd_info);
+  struct tinfo *thd_info_ptr = (struct tinfo *) malloc(sizeof thd_info); // NHM-FIXME
   *thd_info_ptr = thd_info;
-  
-  start_routine = &thread_start;
-  arg = thd_info_ptr;
-  
-}
 
-__interception::pthread_create_interceptor_t pthread_create_interceptor = {.callback = pthread_create_callback, .next = nullptr};
-
-__attribute__((constructor(0))) void register_pthread_create_interceptor() {
-  __interception::intercept_pthread_create(&pthread_create_interceptor);
+  return pthread_create(thread, attr, thread_start, thd_info_ptr);
 }
 
 
