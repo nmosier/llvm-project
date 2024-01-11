@@ -121,5 +121,32 @@ private:
   }
 };
 
+class Lock {
+  pthread_mutex_t *mutex;
+  bool locked;
+
+public:
+  Lock(pthread_mutex_t &mutex): mutex(&mutex), locked(false) {
+    lock();
+  }
+  
+  ~Lock() {
+    if (locked)
+      unlock();
+  }
+
+  void lock() {
+    assert(!locked);
+    pthread_mutex_lock(mutex);
+    locked = true;
+  }
+
+  void unlock() {
+    assert(locked);
+    pthread_mutex_unlock(mutex);
+    locked = false;
+  }
+};
+
 }
 

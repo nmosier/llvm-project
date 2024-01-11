@@ -144,8 +144,10 @@ public:
 };
 
 Thread *threads = nullptr;
+pthread_mutex_t threads_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 __attribute__((constructor(0))) void init_main_thread() {
+  Lock threads_lock(threads_mutex);
   if (threads)
     return;
   
@@ -156,6 +158,7 @@ __attribute__((constructor(0))) void init_main_thread() {
   __fps_thd_stacksizes = threads->stacksizes;
 }
 
+// NHM-NOTE: This doesn't need a lock b/c all callers have locked stuff.
 size_t getUnusedIndex() {
   size_t i;
   for (i = 0; i < getVecSize(); ++i)
@@ -170,6 +173,8 @@ size_t getUnusedIndex() {
 
 extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack() {
   init_main_thread();
+
+  Lock threads_lock(threads_mutex);
   
   const size_t index = getUnusedIndex();
   const size_t stacksize = kDefaultFPSSize;
@@ -181,6 +186,8 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack() {
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index) {
+  Lock threads_lock(threads_mutex);
+  
   index /= sizeof(void *); // NHM-FIXME: This should be moved into FPS's generated consturctor/destructor code, instead.
   for (Thread *thread = threads; thread; thread = thread->next)
     thread->deallocateStack(index);
@@ -197,10 +204,12 @@ struct tinfo {
 };
 
 void *thread_start(void *arg) {
+  Lock threads_lock(threads_mutex);
   tinfo *thd_info = (tinfo *) arg;
   __fps_thd_stackptrs = threads->stackptrs;
   __fps_thd_stackbases = threads->stackbases;
   __fps_thd_stacksizes = threads->stacksizes;
+  threads_lock.unlock();
   return thd_info->start_routine(thd_info->arg);
 }
 
@@ -216,6 +225,8 @@ extern "C" __attribute__((weak, visibility("default"))) int ___interceptor_pthre
 extern "C" __attribute__((visibility("default"))) int __interceptor_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg)  {
   FPS_LOG("[fps] intercepted pthread_create");
 
+  Lock threads_lock(threads_mutex);
+
   // Create a new thread.
   size_t size = kDefaultFPSSize;
   size_t guard = getpagesize(); // NHM-FIXME
@@ -228,6 +239,8 @@ extern "C" __attribute__((visibility("default"))) int __interceptor_pthread_crea
 
   tinfo *thd_info = new (malloc(sizeof(tinfo))) tinfo(new_thread, start_routine, arg);
   FPS_CHECK(thd_info);
+
+  threads_lock.unlock();
 
   return ___interceptor_pthread_create(thread, attr, thread_start, thd_info);
 }

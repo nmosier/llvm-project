@@ -52,7 +52,6 @@ private:
 };
 
 
-
 bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
   for (MachineBasicBlock &MBB : MF) {
     for (MachineInstr &MI : MBB) {
@@ -141,6 +140,11 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   if (!EnableFunctionPrivateStacks || MF.getName().startswith("__fps_"))
     return false;
 
+  if (MF.getName().contains("harrisKernel")) {
+    errs() << "===== BEFORE =====\n";
+    MF.dump();
+  }
+
   TM = &MF.getTarget();
 
   const Module& M = *MF.getFunction().getParent();
@@ -177,11 +181,14 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       LLVM_DEBUG(dbgs() << "skipping frame index " << FI << " which has a non-memory-operand use\n");
       continue;
     }
+    if (Uses.empty())
+      continue;
 
     Align ObjAlign = MFI->getObjectAlign(FI);
     PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
     PrivateFrameSize = llvm::alignTo(PrivateFrameSize, ObjAlign);
     const auto PrivateFrameOffset = PrivateFrameSize;
+    assert(MFI->getObjectSize(FI) > 0);
     PrivateFrameSize += MFI->getObjectSize(FI);
 
     // Move uses to safe stack.
@@ -549,6 +556,12 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
   instrumentSetjmps(MF);
 
+
+  if (MF.getName().contains("harrisKernel")) {
+    errs() << "===== AFTER =====\n";
+    MF.dump();
+  }
+  
   return true;
 }
 
