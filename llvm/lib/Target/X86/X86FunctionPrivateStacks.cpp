@@ -18,6 +18,12 @@ using namespace llvm;
 
 namespace {
 
+// NHM-FIXME: This must be implemented somewhere.
+// NHM-FIXME: use llvm::alignTo
+template <typename T>
+T align_up(T value, T align) {
+  return ((value + align - 1) / align) * align;
+}
 
 class X86FunctionPrivateStacks : public MachineFunctionPass {
 public:
@@ -34,10 +40,6 @@ private:
   const TargetInstrInfo *TII;
   const GlobalValue *StackIdxSym;
   const GlobalValue *ThdStackPtrsSym;
-
-  bool needsFarTLS() const {
-    return TM->getCodeModel() == CodeModel::Medium || TM->getCodeModel() == CodeModel::Large;
-  }
 
   void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalValue *Member, Register Reg);
   void loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
@@ -60,14 +62,6 @@ bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, Machin
           return false;
         MemRefBeginIdx += X86II::getOperandBias(Desc);
         if (MO.getOperandNo() != static_cast<unsigned>(MemRefBeginIdx))
-          return false;
-        if (needsFarTLS()) {
-          const MachineOperand &IndexOp = MI.getOperand(MemRefBeginIdx + 2); // NHM-FIXME: Symbolize.
-          if (!(IndexOp.isReg() && IndexOp.getReg() == X86::NoRegister))
-            return false;
-        }
-        const MachineOperand &SegOp = MI.getOperand(MemRefBeginIdx + X86::AddrSegmentReg);
-        if (!(SegOp.isReg() && SegOp.getReg() == X86::NoRegister))
           return false;
         Uses.push_back(&MO);
       }
@@ -125,7 +119,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   DebugLoc Loc;
 
   uint64_t PrivateFrameSize = 0;
-  DenseMap<int, uint64_t> ObjIdxToOff;
+  Align PrivateFrameAlign;
   for (int FI = MFI.getObjectIndexBegin(); FI < MFI.getObjectIndexEnd(); ++FI) {
     if (MFI.isFixedObjectIndex(FI))
       continue;
@@ -135,22 +129,14 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       continue;
     }
 
+    Align ObjAlign = MFI.getObjectAlign(FI);
+    PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
+    PrivateFrameSize = llvm::alignTo(PrivateFrameSize, ObjAlign);
     const auto PrivateFrameOffset = PrivateFrameSize;
     PrivateFrameSize += MFI.getObjectSize(FI);
 
-#if 0
     // Move uses to safe stack.
     for (MachineOperand *UseOp : Uses) {
-      // Orig:
-      //   LEA r1, [FrameIndex + scale*r2 + disp]
-      // Rewritten (small code):
-      //   LEA r1, [rbx + scale*r2 + disp+PrivateFrameOffset+TLSOffset]
-      //   ADD r1, fs:[0] # NOTE: this only works if EFLAGS is not live. 
-      // Rewritten (large code):
-      //   LEA r1, [rbx + scale*r2 + disp+PrivateFrameOffset]
-      //   ADD r1, fs:[0]
-      //   ADD r1, TLSOffset
-      
       MachineInstr *MI = UseOp->getParent();
       const unsigned MemRefIdxBegin = UseOp->getOperandNo() - X86::AddrBaseReg;
       MachineOperand &BaseOp = MI->getOperand(MemRefIdxBegin + X86::AddrBaseReg);
@@ -159,36 +145,11 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       MachineOperand &DispOp = MI->getOperand(MemRefIdxBegin + X86::AddrDisp);
       MachineOperand &SegmentOp = MI->getOperand(MemRefIdxBegin + X86::AddrSegmentReg);
 
-      if (needsFarTLS()) {
-        report_fatal_error("large code not supported yet");
-      } else {
-        BaseOp.ChangeToRegister(X86::RBX, /*isDef*/false);
-        DispOp.ChangeToGA(StackBaseSym, DispOp.getImm() + PrivateFrameOffset, X86II::MO_TPOFF);
-
-        switch (MI->getOpcode()) {
-        case X86::LEA64r:
-          BuildMI(*MI->getParent(), std::next(MI->getIterator()), Loc, TII->get(X86::ADD64rm), MI->getOperand(0).getReg())
-              .addReg(X86::NoRegister)
-              .addImm(1)
-              .addReg(X86::NoRegister)
-              .addImm(0)
-              .addReg(X86::FS);
-          break;
-
-        case X86::LEA32r:
-        case X86::LEA16r:
-          report_fatal_error("Unexpected 16- or 32-bit LEA with frame index operand");
-
-        default:
-          SegmentOp.setReg(X86::FS);
-          break;
-        }
-      }
-      
+      BaseOp.ChangeToRegister(X86::RBX, /*isDef*/false);
+      DispOp.setImm(DispOp.getImm() + PrivateFrameOffset);
     }
-#endif
-    
   }
+  PrivateFrameSize = llvm::alignTo(PrivateFrameSize, PrivateFrameAlign);
 
 
   // PROLOGUE: Private stack frame setup on function entry.
