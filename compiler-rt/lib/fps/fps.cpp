@@ -15,67 +15,6 @@ const unsigned kDefaultFPSSize = 0x80000;
 const unsigned kGuardSize = getpagesize();
 const unsigned kStackAlign = 16;
 
-#if 0
-// NHM-FIXME: Use size_t rather than uint64_t?
-extern "C" __attribute__((visibility("default"))) void *__fps_alloc(uint64_t size, uint64_t guard) {
-  size_t size = kDefaultFPSSize;
-}
-
-#endif
-
-#if 0
-typedef uint64_t setjmp_ctx_cb_size(void);
-typedef uint64_t setjmp_ctx_cb_save(void *);
-typedef uint64_t setjmp_ctx_cb_restore(void *);
-
-struct setjmp_ctx_ll {
-  uint64_t (*size)(void);
-  uint64_t (*save)(void *);
-  uint64_t (*restore)(const void *);
-  setjmp_ctx_ll *prev;
-  setjmp_ctx_ll *next;
-};
-
-setjmp_ctx_ll *setjmp_ctx_root;
-
-extern "C" __attribute__((visibility("default"))) void __fps_setjmp_ctx_register(setjmp_ctx_ll *ctx) {
-  ctx->prev = nullptr;
-  ctx->next = setjmp_ctx_root;
-  ctx->next->prev = ctx;
-  setjmp_ctx_root = ctx;
-}
-
-extern "C" __attribute__((visibility("default"))) void __fps_setjmp_ctx_deregister(setjmp_ctx_ll *ctx) {
-  if (ctx->prev)
-    ctx->prev->next = ctx->next;
-  else
-    setjmp_ctx_root = ctx->next;
-  if (ctx->next)
-    ctx->next->prev = ctx->prev;
-}
-
-extern "C" __attribute__((visibility("default"))) uint64_t __fps_setjmp_ctx_size(void) {
-  uint64_t size = 0;
-  for (const setjmp_ctx_ll *it = setjmp_ctx_root; it; it = it->next)
-    size += it->size();
-  return size;
-}
-
-extern "C" __attribute__((visibility("default"))) uint64_t __fps_setjmp_ctx_save(void *buf) {
-  uint64_t size = 0;
-  for (const setjmp_ctx_ll *it = setjmp_ctx_root; it; it = it->next)
-    size += it->save((char *) buf + size);
-  return size;
-}
-
-extern "C" __attribute__((visibility("default"))) uint64_t __fps_setjmp_ctx_restore(const void *buf) {
-  uint64_t size = 0;
-  for (const setjmp_ctx_ll *it = setjmp_ctx_root; it; it = it->next)
-    size += it->restore((const char *) buf + size);
-  return size;
-}
-#endif
-
 struct FunctionPrivateStack {
   uintptr_t size;
   void *base;
@@ -128,63 +67,6 @@ size_t map_length = 0;
 size_t getVecSize() {
   return map_length / sizeof(void *);
 }
-
-#if 0
-
-extern "C" __attribute__((visibility("default"))) thread_local FunctionPrivateStack *__fps_thdstacks = nullptr;
-
-struct thread_ll {
-  PinnedVector<FunctionPrivateStack> stacks;
-  thread_ll *next;
-
-  thread_ll(size_t num_stacks, thread_ll *next = nullptr): stacks(num_stacks), next(next) {}
-};
-
-thread_ll *threads;
-
-// NHM-FIXME: Is there a cleaner way to do this? 
-__attribute__((constructor(0))) void init_main_thread() {
-  if (threads)
-    return;
-  
-  threads = (thread_ll *) malloc(sizeof(thread_ll));
-  FPS_CHECK(threads);
-  new (threads) thread_ll(num_stacks);
-  __fps_thdstacks = threads->stacks.getData();
-  fprintf(stderr, "__fps_thdstacks = %p\n", __fps_thdstacks);
-}
-
-// NHM-FIXME: Needs to take size arguments.
-extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack() {
-  init_main_thread();
-  
-  const size_t size = kDefaultFPSSize;
-  bool index_valid = false;
-  uint64_t index;
-  for (thread_ll *thread = threads; thread; thread = thread->next) {
-    FunctionPrivateStack fps;
-    fps.allocate(size, kGuardSize);
-    const uint64_t new_index = thread->stacks.insert(static_cast<FunctionPrivateStack &&>(fps));
-    if (index_valid) {
-      FPS_CHECK(index == new_index);
-    } else {
-      index = new_index;
-      index_valid = true;
-    }
-  }
-  return index;
-}
-
-extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index) {
-  for (thread_ll *thread = threads; thread; thread = thread->next) {
-    thread->stacks[index].deallocate();
-  }
-}
-
-#endif
-
-
-
 
 extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackptrs = nullptr;
 extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackbases = nullptr;
@@ -350,11 +232,23 @@ extern "C" __attribute__((visibility("default"))) int __interceptor_pthread_crea
   return ___interceptor_pthread_create(thread, attr, thread_start, thd_info);
 }
 
+struct GlobalContext {
+  size_t num_stackptrs;
+  void **stackptrs;
+};
+
+extern "C" __attribute__((visibility("default"))) GlobalContext *__fps_ctx_alloc() {
+  GlobalContext *ctx = (GlobalContext *) malloc(sizeof(GlobalContext));
+  ctx->num_stackptrs = getVecSize();
+  ctx->stackptrs = (void **) malloc(sizeof(void *) * ctx->num_stackptrs);
+  memcpy(ctx->stackptrs, __fps_thd_stackptrs, map_length);
+  return ctx;
+}
+
+extern "C" __attribute__((visibility("default"))) void __fps_ctx_free(GlobalContext *ctx) {
+  free(ctx->stackptrs);
+  free(ctx);
+}
 
 }
 }
-
-int get_errno() {
-  return errno;
-}
-
