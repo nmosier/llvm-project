@@ -26,11 +26,13 @@ class FunctionPrivateStacks {
   LLVMContext &Ctx;
   bool Changed;
   IntegerType *Int64Ty;
+  PointerType *PtrTy;
   FunctionCallee RegStack;
   FunctionCallee DeregStack;
   
   void runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRBuilder<> &DtorIRB);
   void interceptPthreadCreate();
+  void handleSjLj();
   
 public:
   FunctionPrivateStacks(Module &M) : M(M), Ctx(M.getContext()), Changed(false) {}
@@ -60,8 +62,57 @@ void FunctionPrivateStacks::interceptPthreadCreate() {
   PthreadCreate->eraseFromParent();
 }
 
+void FunctionPrivateStacks::handleSjLj() {
+#if 0
+  auto *JmpBufTy = ArrayType::get(PtrTy, 5);
+  auto *NewStackContextTy = StructType::get(Ctx, {PtrTy, PtrTy});
+  
+  if (Function *SetjmpFn = M.getFunction("llvm.eh.sjlj.setjmp")) {
+    for (Use &SetjmpUse : SetjmpFn->uses()) {
+      IntrinsicInst *SetjmpCall = cast<IntrinsicInst>(SetjmpUse.getUser());
+      Value *JmpBuf = SetjmpCall->getArgOperand(0);
+      IRBuilder<> IRB(SetjmpCall);
+      Value *StackCtxPtr = IRB.CreateGEP2_32(JmpBufTy, JmpBuf, 0, 2);
+      Value *NewStackCtx = IRB.CreateAlloca(NewStackContextTy);
+      Value *OldStackCtx = IRB.CreateLoad(PtrTy, StackCtxPtr);
+      IBR.CreateStore(NewStackCtx, StackCtxPtr);
+      IRB.CreateStore(OldStackCtx, IRB.CreateStructGEP(NewStackContextTy, StackCtxPtr, 0));
+      Value *FPSStackCtx = IRB.CreateCall(M.getOrInsertFunction("__fps_ctx_alloc", FPSCtxAllocFTy));
+      IRB.CreateStore(FPSStackCtx, IRB.CreateStructGEP(NewStackContextTy, StackCtxPtr, 1));
+      SetjmpCall->setArgOperand(0, NewStackCtxPtr);
+    }
+  }
+
+  if (Function *LongjmpFn = M.getFunction("llvm.eh.sjlj.longjmp")) {
+    for (Use &LongjmpUse : LongjmpFn->uses()) {
+      IntrinsicInst *LongjmpCall = cast<IntrinsicInst>(LongjmpUse.getUser());
+      Value *JmpBuf = LongjmpCall->getArgOperand(0);
+      IRBuilder<> IRB(LongjmpCall);
+      Value *StackCtxPtr = IRB.CreateGEP2_32(JmpBufTy, 0, 2);
+      Value *NewStackCtx = IRB.CreateLoad(PtrTy, StackCtxPtr);
+      IRB.CreateStore(OldStackCtx, StackCtxPtr);
+      Value *OldStackCtx = IRB.CreateLoad(PtrTy, IRB.CreateStructGEP(NewStackContextTy, NewStackCtx, 0));
+      Value *FPSStackCtx = IRB.CreateLoad(PtrTy, IRB.CreateStructGEP(NewStackCotnextTy, NewStackCtx, 1));
+      IRB.CreateCall(M.getOrInsertFunction("__fps_ctx_restore", FPSCtxRestoreFTy), {FPSStackCtx});
+    }
+  }
+#endif
+#if 0
+
+  // NHM-FIXME: Get direct name?
+  if (Function *SetjmpFn = M.getFunction("llvm.eh.sjlj.setjmp")) {
+    for (Use &SetjmpUse : SetjmpFn->uses()) {
+      IRBuilder<> IRB(SetjmpUse.getUser());
+      
+    }
+  }
+#endif
+  
+}
+
 bool FunctionPrivateStacks::run() {
   Int64Ty = IntegerType::get(Ctx, 64);
+  PtrTy = PointerType::getUnqual(Ctx);
     
   // Declare thread-local variable.
   new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stackptrs");

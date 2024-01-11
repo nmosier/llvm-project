@@ -237,7 +237,7 @@ struct GlobalContext {
   void **stackptrs;
 };
 
-extern "C" __attribute__((visibility("default"))) GlobalContext *__fps_ctx_alloc() {
+extern "C" __attribute__((visibility("default"))) GlobalContext *__fps_ctx_save() {
   GlobalContext *ctx = (GlobalContext *) malloc(sizeof(GlobalContext));
   ctx->num_stackptrs = getVecSize();
   ctx->stackptrs = (void **) malloc(sizeof(void *) * ctx->num_stackptrs);
@@ -245,7 +245,8 @@ extern "C" __attribute__((visibility("default"))) GlobalContext *__fps_ctx_alloc
   return ctx;
 }
 
-extern "C" __attribute__((visibility("default"))) void __fps_ctx_free(GlobalContext *ctx) {
+extern "C" __attribute__((visibility("default"))) void __fps_ctx_restore(GlobalContext *ctx) {
+  memcpy(__fps_thd_stackptrs, ctx->stackptrs, ctx->num_stackptrs * sizeof(ctx->stackptrs[0]));
   free(ctx->stackptrs);
   free(ctx);
 }

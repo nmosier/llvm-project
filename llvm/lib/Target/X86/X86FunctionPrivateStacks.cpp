@@ -38,6 +38,8 @@ public:
 private:
   const TargetMachine *TM;
   const TargetInstrInfo *TII;
+  const X86RegisterInfo *TRI;
+  MachineFrameInfo *MFI;
   const GlobalValue *StackIdxSym;
   const GlobalValue *ThdStackPtrsSym;
 
@@ -46,6 +48,7 @@ private:
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
 
   bool frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses);
+  void instrumentSetjmps(MachineFunction &MF);
 };
 
 
@@ -87,6 +90,52 @@ void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, Machi
       .addGlobalAddress(Member, 0, X86II::MO_DTPOFF)
       .addReg(X86::FS);
 }
+
+void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
+  SmallVector<MachineInstr *> Setjmps;
+  for (MachineBasicBlock &MBB : MF)
+    for (MachineInstr &MI : MBB)
+      if (MI.getOpcode() == X86::EH_SjLj_Setup)
+        Setjmps.push_back(&MI);
+
+  // NHM-FIXME: Format of EH_SjLj_Setup <bb> <regmask>
+  for (MachineInstr *Setjmp : Setjmps) {
+    DebugLoc Loc;
+    MachineBasicBlock *TargetMBB = Setjmp->getOperand(0).getMBB();
+
+    // Insert call to __fps_ctx_alloc. Note that it's okay that the call
+    // clobbers registers since EH_SjLj_Setup will clobber everything anyway.
+    // NHM-FIXME: Add assert to verify this.
+    const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
+    BuildMI(*Setjmp->getParent(), Setjmp->getIterator(), Loc, TII->get(X86::CALL64pcrel32))
+        .addExternalSymbol("__fps_ctx_save")
+        .addRegMask(RegMask);
+    // NHM-FIXME: Make RAX implicit def?
+    // NHM-FIXME: Make work with x86-32.
+    const int CtxFI = MFI->CreateSpillStackObject(8, Align(8)); // NHM-FIXME: This shall not be moved to function-private stack!
+    BuildMI(*Setjmp->getParent(), Setjmp->getIterator(), Loc, TII->get(X86::MOV64mr))
+        .addFrameIndex(CtxFI)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister)
+        .addReg(X86::RAX);
+
+    // At longjmp target, restore context.
+    // NHM-FIXME: Assert no registers are live here.
+    const auto TargetMBBI = TargetMBB->begin();
+    BuildMI(*TargetMBB, TargetMBBI, Loc, TII->get(X86::MOV64rm), X86::RDI)
+        .addFrameIndex(CtxFI)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+    // NHM-FIXME: Make RDI implicit use?
+    BuildMI(*TargetMBB, TargetMBBI, Loc, TII->get(X86::CALL64pcrel32))
+        .addExternalSymbol("__fps_ctx_restore")
+        .addRegMask(RegMask);
+  }
+}
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   if (!EnableFunctionPrivateStacks || MF.getName().startswith("__fps_"))
@@ -100,15 +149,15 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   // and that we only need a stack pointer, not a base pointer or frame pointer.
   auto &STI = MF.getSubtarget<X86Subtarget>();
   TII = STI.getInstrInfo();
-  auto *TRI = STI.getRegisterInfo();
-  auto &MFI = MF.getFrameInfo();
+  TRI = STI.getRegisterInfo();
+  MFI = &MF.getFrameInfo();
   auto &MRI = MF.getRegInfo();
 
   // NHM-FIXME: Make it an assert?
   if (TRI->hasBasePointer(MF))
     report_fatal_error("No function should have base pointer with FPS enabled!");
   assert(MRI.reg_empty(X86::RBX) && "Expected no existing uses of RBX for functions requiring a private stack!");
-  assert(!MFI.hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
+  assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
 
 
   StackIdxSym = M.getNamedValue(("__fps_stackidx_" + MF.getName()).str());
@@ -120,8 +169,8 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
   uint64_t PrivateFrameSize = 0;
   Align PrivateFrameAlign;
-  for (int FI = MFI.getObjectIndexBegin(); FI < MFI.getObjectIndexEnd(); ++FI) {
-    if (MFI.isFixedObjectIndex(FI))
+  for (int FI = MFI->getObjectIndexBegin(); FI < MFI->getObjectIndexEnd(); ++FI) {
+    if (MFI->isFixedObjectIndex(FI))
       continue;
     SmallVector<MachineOperand *> Uses;
     if (!frameIndexOnlyUsedInMemoryOperands(FI, MF, Uses)) {
@@ -129,11 +178,11 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       continue;
     }
 
-    Align ObjAlign = MFI.getObjectAlign(FI);
+    Align ObjAlign = MFI->getObjectAlign(FI);
     PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
     PrivateFrameSize = llvm::alignTo(PrivateFrameSize, ObjAlign);
     const auto PrivateFrameOffset = PrivateFrameSize;
-    PrivateFrameSize += MFI.getObjectSize(FI);
+    PrivateFrameSize += MFI->getObjectSize(FI);
 
     // Move uses to safe stack.
     for (MachineOperand *UseOp : Uses) {
@@ -189,12 +238,17 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   SmallVector<MachineInstr *> Exits;
   for (MachineBasicBlock &MBB : MF) {
     for (MachineInstr &MI : MBB) {
+      // NHM-FIXME: ENDBRANCHes haven't been inserted at this point, so the second half of the if condition does nothing.
       if ((MI.isCall() && !MI.isTerminator()) ||
           ((MI.getOpcode() == X86::ENDBR32 || MI.getOpcode() == X86::ENDBR64) && &MBB != &MF.front())) {
         ICTs.push_back(&MI);
       }
+      // NHM-FIXME: Turn some of these into if-elses to speed up.
       if (MI.isReturn())
         Exits.push_back(&MI);
+      // NHM-NOTE: This works only because we insert the SjLj instrumentation later.
+      if (MI.getOpcode() == X86::EH_SjLj_Setup)
+        ICTs.push_back(&MI.getOperand(0).getMBB()->front());
     }
   }
   for (MachineInstr *ICT : ICTs) {
@@ -491,6 +545,9 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   TII->insertUnconditionalBranch(AllocMBB, &EntryMBB, DebugLoc());
   AllocMBB.addSuccessor(&EntryMBB);
 #endif
+
+
+  instrumentSetjmps(MF);
 
   return true;
 }
