@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <errno.h>
+#include <string.h>
 #include "safestack/safestack_util.h"
 #include "safestack/safestack_platform.h"
 #include "fps/fps_util.h"
@@ -164,7 +166,7 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack() {
     fps.allocate(size, kGuardSize);
     const uint64_t new_index = thread->stacks.insert(static_cast<FunctionPrivateStack &&>(fps));
     if (index_valid) {
-      assert(index == new_index);
+      FPS_CHECK(index == new_index);
     } else {
       index = new_index;
       index_valid = true;
@@ -190,15 +192,12 @@ extern "C" __attribute__((visibility("default"))) thread_local uint64_t *__fps_t
 
 class Thread {
 public:
-  void ** const stackptrs;
-  void ** const stackbases;
-  uintptr_t * const stacksizes;
+  void **stackptrs;
+  void **stackbases;
+  uintptr_t *stacksizes;
   Thread *next;
 
 private:
-  static_assert(sizeof *stackptrs == sizeof *stackbases, ""); // NHM-FIXME
-  static_assert(sizeof *stackptrs == sizeof *stacksizes, ""); // NHM-FIXME
-
   static size_t CalculateMinSize(size_t num_stacks) {
     return align_up<size_t>(max<size_t>(1, num_stacks * sizeof(void *)), getpagesize());
   }
@@ -206,29 +205,43 @@ private:
   template <typename T>
   T *CreateNewMap() {
     static_assert(sizeof(T) == sizeof(void *), "");
-    assert(map_length % sizeof(T) == 0);
+    FPS_CHECK(map_length % sizeof(T) == 0);
     T *map = static_cast<T *>(safestack::Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
     FPS_CHECK(map != MAP_FAILED);
     return map;
   }
 
-  static void growOne(void *map) {
-    void *new_map = Mremap(map, map_length, map_length + getpagesize());
-    FPS_CHECK(new_map == map);
+  template <typename T>
+  static void growOne(T *&map) {
+    void *old_map = map;
+    void *new_map = Mremap(old_map, map_length, map_length * 2);
+    if (new_map == MAP_FAILED && errno == ENOMEM) {
+      new_map = safestack::Mmap(old_map, map_length * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+      FPS_CHECK(map != MAP_FAILED);
+      memcpy(new_map, old_map, map_length);
+      // NHM-FIXME: Figure out a way to do this.
+      // Munmap(map, map_length, map_length * 2);
+      safestack::Mprotect(old_map, map_length, PROT_READ);
+    }
+    map = (T *) new_map;
   }
 
 public:
 
-  Thread(Thread *next = nullptr): stackptrs(CreateNewMap<void *>()), stackbases(CreateNewMap<void *>()), stacksizes(CreateNewMap<uintptr_t>()) {}
+  Thread(Thread *next): next(next) {
+    stackptrs = CreateNewMap<void *>();
+    stackbases = CreateNewMap<void *>();
+    stacksizes = CreateNewMap<uintptr_t>();
+  }
 
   void grow() {
-    growOne(stackptrs);
-    growOne(stackbases);
-    growOne(stacksizes);
+    growOne(stackptrs); __fps_thd_stackptrs = stackptrs;
+    growOne(stackbases); __fps_thd_stackbases = stackbases;
+    growOne(stacksizes); __fps_thd_stacksizes = stacksizes;
   }
 
   void allocateStack(size_t index, size_t stacksize, size_t guardsize) {
-    assert(index < getVecSize());
+    FPS_CHECK(index < getVecSize());
     // NHM-FIXME: Do guard.
     void *stackbase = safestack::Mmap(nullptr, stacksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     FPS_CHECK(stackbase != MAP_FAILED);
@@ -239,8 +252,8 @@ public:
   }
 
   void deallocateStack(size_t index) {
-    assert(index < getVecSize());
-    assert(stacksizes[index] > 0);
+    FPS_CHECK(index < getVecSize());
+    FPS_CHECK(stacksizes[index] > 0);
     safestack::Munmap(nullptr, stacksizes[index]);
     stacksizes[index] = 0;
     stackbases[index] = nullptr;
@@ -255,11 +268,10 @@ __attribute__((constructor(0))) void init_main_thread() {
     return;
   
   map_length = getpagesize(); // NHM-FIXME: Maybe hard-code it instead?
-  threads = new (malloc(sizeof(Thread))) Thread();
-
-  __fps_thd_stacksizes = threads->stacksizes;
+  threads = new (malloc(sizeof(Thread))) Thread(threads);
   __fps_thd_stackptrs = threads->stackptrs;
   __fps_thd_stackbases = threads->stackbases;
+  __fps_thd_stacksizes = threads->stacksizes;
 }
 
 size_t getUnusedIndex() {
@@ -270,7 +282,7 @@ size_t getUnusedIndex() {
   for (Thread *thread = threads; thread; thread = thread->next)
     thread->grow();
   map_length += getpagesize();
-  assert(i < getVecSize());
+  FPS_CHECK(i < getVecSize());
   return i;
 }
 
@@ -297,13 +309,16 @@ struct tinfo {
   Thread *thread;
   void *(*start_routine)(void *);
   void *arg;
+
+  tinfo(Thread *thread, void *(*start_routine)(void *), void *arg):
+      thread(thread), start_routine(start_routine), arg(arg) {}
 };
 
 void *thread_start(void *arg) {
   tinfo *thd_info = (tinfo *) arg;
-  __fps_thd_stacksizes = thd_info->thread->stacksizes;
-  __fps_thd_stackptrs = thd_info->thread->stackptrs;
-  __fps_thd_stackbases = thd_info->thread->stackbases;
+  __fps_thd_stackptrs = threads->stackptrs;
+  __fps_thd_stackbases = threads->stackbases;
+  __fps_thd_stacksizes = threads->stacksizes;
   return thd_info->start_routine(thd_info->arg);
 }
 
@@ -319,25 +334,27 @@ extern "C" __attribute__((weak, visibility("default"))) int ___interceptor_pthre
 extern "C" __attribute__((visibility("default"))) int __interceptor_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg)  {
   FPS_LOG("[fps] intercepted pthread_create");
 
+  // Create a new thread.
   size_t size = kDefaultFPSSize;
   size_t guard = getpagesize(); // NHM-FIXME
-
-  // Create a new thread.
   Thread *ref_thread = threads;
-  Thread *new_thread = threads = new (malloc(sizeof(Thread))) Thread(threads);
-  for (size_t i = 0; i < getVecSize(); ++i) {
-    if (ref_thread->stacksizes[i]) {
+  Thread *new_thread = new (malloc(sizeof(Thread))) Thread(threads);
+  for (size_t i = 0; i < getVecSize(); ++i)
+    if (ref_thread->stacksizes[i])
       new_thread->allocateStack(i, size, guard);
-    }
-  }
+  threads = new_thread;
 
-  struct tinfo thd_info = {.thread = new_thread, .start_routine = start_routine, .arg = arg};
-  struct tinfo *thd_info_ptr = (struct tinfo *) malloc(sizeof thd_info); // NHM-FIXME
-  *thd_info_ptr = thd_info;
+  tinfo *thd_info = new (malloc(sizeof(tinfo))) tinfo(new_thread, start_routine, arg);
+  FPS_CHECK(thd_info);
 
-  return ___interceptor_pthread_create(thread, attr, thread_start, thd_info_ptr);
+  return ___interceptor_pthread_create(thread, attr, thread_start, thd_info);
 }
 
 
 }
 }
+
+int get_errno() {
+  return errno;
+}
+
