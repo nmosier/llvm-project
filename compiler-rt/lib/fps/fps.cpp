@@ -11,7 +11,7 @@ namespace fps {
 namespace {
 
 /// Default size of function-private stacks.
-const unsigned kDefaultFPSSize = 0x80000;
+const unsigned kDefaultFPSSize = 0x100000;
 const unsigned kGuardSize = getpagesize();
 const unsigned kStackAlign = 16;
 
@@ -262,6 +262,14 @@ extern "C" __attribute__((visibility("default"))) void __fps_ctx_restore(GlobalC
   memcpy(__fps_thd_stackptrs, ctx->stackptrs, ctx->num_stackptrs * sizeof(ctx->stackptrs[0]));
   free(ctx->stackptrs);
   free(ctx);
+}
+
+extern "C" __attribute__((visibility("default"))) int __fps_ctx_save_or_restore(GlobalContext **ctx, int setjmp_retval) {
+  if (setjmp_retval)
+    __fps_ctx_restore(*ctx);
+  else
+    *ctx = __fps_ctx_save();
+  return setjmp_retval;
 }
 
 }

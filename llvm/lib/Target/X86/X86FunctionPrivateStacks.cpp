@@ -51,6 +51,34 @@ private:
   void instrumentSetjmps(MachineFunction &MF);
 };
 
+// NHM-FIXME: move this to shared
+// NHM-FIXME: Add remaining cases.
+int getMemoryOperandNo(const MachineInstr &MI) {
+  int i = X86II::getMemoryOperandNo(MI.getDesc().TSFlags);
+  if (i >= 0)
+    return i;
+  // NHM-FIXME: REMOVE
+  if (MI.getOpcode() == X86::TCRETURNmi64)
+    assert(X86II::isPseudo(MI.getDesc().TSFlags));
+  if (!X86II::isPseudo(MI.getDesc().TSFlags))
+    return -1;
+  switch (MI.getOpcode()) {
+  case X86::INLINEASM:
+  case X86::DBG_VALUE:
+    return -1;
+  case X86::TCRETURNmi64:
+    i = 0;
+    break;
+  case X86::VASTART_SAVE_XMM_REGS:
+    i = 1;
+    break;
+  default:
+    errs() << "unhandled pseudo-instruction: " << MI;
+    llvm_unreachable("Failed to handle pseudo instruction!"); // NHM-FIXME
+  }
+  return i + X86II::getOperandBias(MI.getDesc());
+}
+
 
 bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
   for (MachineBasicBlock &MBB : MF) {
@@ -58,11 +86,9 @@ bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, Machin
       for (MachineOperand &MO : MI.operands()) {
         if (!(MO.isFI() && MO.getIndex() == FI))
           continue;
-        const MCInstrDesc &Desc = MI.getDesc();
-        int MemRefBeginIdx = X86II::getMemoryOperandNo(Desc.TSFlags);
+        const int MemRefBeginIdx = getMemoryOperandNo(MI);
         if (MemRefBeginIdx < 0)
           return false;
-        MemRefBeginIdx += X86II::getOperandBias(Desc);
         if (MO.getOperandNo() != static_cast<unsigned>(MemRefBeginIdx))
           return false;
         Uses.push_back(&MO);
@@ -91,21 +117,23 @@ void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, Machi
 }
 
 void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
-  SmallVector<MachineInstr *> Setjmps;
+  const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
+  
+  SmallVector<MachineInstr *> BuiltinSetjmps;
   for (MachineBasicBlock &MBB : MF)
     for (MachineInstr &MI : MBB)
       if (MI.getOpcode() == X86::EH_SjLj_Setup)
-        Setjmps.push_back(&MI);
+        BuiltinSetjmps.push_back(&MI);
 
   // NHM-FIXME: Format of EH_SjLj_Setup <bb> <regmask>
-  for (MachineInstr *Setjmp : Setjmps) {
+  for (MachineInstr *Setjmp : BuiltinSetjmps) {
     DebugLoc Loc;
     MachineBasicBlock *TargetMBB = Setjmp->getOperand(0).getMBB();
 
     // Insert call to __fps_ctx_alloc. Note that it's okay that the call
     // clobbers registers since EH_SjLj_Setup will clobber everything anyway.
     // NHM-FIXME: Add assert to verify this.
-    const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
+    // NHM-FIXME: Should probably move this afterwards?
     BuildMI(*Setjmp->getParent(), Setjmp->getIterator(), Loc, TII->get(X86::CALL64pcrel32))
         .addExternalSymbol("__fps_ctx_save")
         .addRegMask(RegMask);
@@ -134,6 +162,50 @@ void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
         .addExternalSymbol("__fps_ctx_restore")
         .addRegMask(RegMask);
   }
+
+
+
+  // Real C setjmps/longjmps.
+  SmallVector<MachineInstr *> ExternalSetjmps;
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineInstr &MI : MBB) {
+      if (!MI.isCall()) // NHM-FIXME: Are indirect calls considered to be indirect branches?
+        continue;
+      if (MI.mayLoadOrStore()) {
+        if (getMemoryOperandNo(MI) < 0)
+          errs() << "bad thingie: " << MI;
+        assert(getMemoryOperandNo(MI) >= 0);
+        continue;
+      }
+      const MachineOperand &MO = TII->getCalleeOperand(MI);
+      if (!MO.isGlobal())
+        continue;
+      const Function *Callee = cast<Function>(MO.getGlobal());
+      if (!Callee->hasFnAttribute(Attribute::ReturnsTwice))
+        continue;
+      ExternalSetjmps.push_back(&MI);
+    }
+  }
+
+  for (MachineInstr *Setjmp : ExternalSetjmps) {
+    DebugLoc Loc;
+    MachineBasicBlock &MBB = *Setjmp->getParent();
+    MachineBasicBlock::iterator MBBI = std::next(Setjmp->getIterator());
+    const int CtxFI = MFI->CreateSpillStackObject(8, Align(8));
+
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::LEA64r), X86::RDI)
+        .addFrameIndex(CtxFI)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::COPY), X86::ESI)
+        .addReg(X86::EAX); // NHM-FIXME: kill?
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::CALL64pcrel32))
+        .addExternalSymbol("__fps_ctx_save_or_restore")
+        .addRegMask(RegMask);
+  }
+  
 }
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
