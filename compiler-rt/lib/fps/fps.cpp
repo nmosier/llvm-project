@@ -71,6 +71,7 @@ size_t getVecSize() {
 extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackptrs = nullptr;
 extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackbases = nullptr;
 extern "C" __attribute__((visibility("default"))) thread_local uint64_t *__fps_thd_stacksizes = nullptr;
+const char **names = nullptr;
 
 class Thread {
 public:
@@ -130,7 +131,7 @@ public:
     stacksizes[index] = stacksize;
     stackbases[index] = stackbase;
     stackptrs[index] = static_cast<char *>(stackbase) + stacksize;
-    FPS_LOG("allocated stack at %p", stackbase);
+    FPS_LOG("allocated stack for %s at %p-%p", names[index], stackbase, (char *) stackbase + stacksize);
   }
 
   void deallocateStack(size_t index) {
@@ -156,6 +157,7 @@ __attribute__((constructor(0))) void init_main_thread() {
   __fps_thd_stackptrs = threads->stackptrs;
   __fps_thd_stackbases = threads->stackbases;
   __fps_thd_stacksizes = threads->stacksizes;
+  names = (const char **) malloc(getpagesize());
 }
 
 // NHM-NOTE: This doesn't need a lock b/c all callers have locked stuff.
@@ -166,12 +168,13 @@ size_t getUnusedIndex() {
       return i;
   for (Thread *thread = threads; thread; thread = thread->next)
     thread->grow();
-  map_length += getpagesize();
+  map_length *= 2;
   FPS_CHECK(i < getVecSize());
+  names = (const char **) realloc(names, map_length); // NHM-FIXME: Check.
   return i;
 }
 
-extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack() {
+extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack(const char *name) {
   init_main_thread();
 
   Lock threads_lock(threads_mutex);
@@ -179,19 +182,20 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack() {
   const size_t index = getUnusedIndex();
   const size_t stacksize = kDefaultFPSSize;
   const size_t guardsize = getpagesize(); // NHM-FIXME
+  FPS_LOG("registering %s (%" PRIu64 ")", name, index);
+  names[index] = name;
   for (Thread *thread = threads; thread; thread = thread->next)
     thread->allocateStack(index, stacksize, guardsize);
-  FPS_LOG("registered index %" PRIu64, index);
   return index * sizeof(void *); // NHM-FIXME
 }
 
-extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index) {
+extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index, const char *name) {
   Lock threads_lock(threads_mutex);
   
   index /= sizeof(void *); // NHM-FIXME: This should be moved into FPS's generated consturctor/destructor code, instead.
   for (Thread *thread = threads; thread; thread = thread->next)
     thread->deallocateStack(index);
-  FPS_LOG("deregistered index %" PRIu64, index);
+  FPS_LOG("deregistered %s (%" PRIu64 ")", name, index);
 }
 
 struct tinfo {

@@ -31,8 +31,6 @@ class FunctionPrivateStacks {
   FunctionCallee DeregStack;
   
   void runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRBuilder<> &DtorIRB);
-  void interceptPthreadCreate();
-  void handleSjLj();
   
 public:
   FunctionPrivateStacks(Module &M) : M(M), Ctx(M.getContext()), Changed(false) {}
@@ -43,71 +41,18 @@ void FunctionPrivateStacks::runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRB
   // NHM-FIXME: Assert only works on 64-bit architectures.
 
   // NHM-FIXME: Should this always have private linkage?
-  auto *StackIdxVar = new GlobalVariable(M, Int64Ty, /*isConstant*/false, GlobalVariable::PrivateLinkage, Constant::getNullValue(Int64Ty) , "__fps_stackidx_" + F.getName());
+  auto *StackIdxVar = new GlobalVariable(M, Int64Ty, /*isConstant*/false, GlobalVariable::InternalLinkage, Constant::getNullValue(Int64Ty) , "__fps_stackidx_" + F.getName());
+  Constant *FnNameExpr = ConstantDataArray::getString(Ctx, F.getName(), true);
+  Constant *FnName = new GlobalVariable(M, FnNameExpr->getType(), /*isConsatnt*/true, GlobalVariable::PrivateLinkage, FnNameExpr);
+  
+  
 
   // Register stack.
-  Value *StackIdx = CtorIRB.CreateCall(RegStack);
+  Value *StackIdx = CtorIRB.CreateCall(RegStack, {FnName});
   CtorIRB.CreateStore(StackIdx, StackIdxVar);
 
   // Deregister stack.
-  DtorIRB.CreateCall(DeregStack, {DtorIRB.CreateLoad(Int64Ty, StackIdxVar)});
-}
-
-void FunctionPrivateStacks::interceptPthreadCreate() {
-  Function *PthreadCreate = M.getFunction("pthread_create");
-  if (!PthreadCreate)
-    return;
-  Function *WrapPthreadCreate = Function::Create(PthreadCreate->getFunctionType(), Function::ExternalLinkage, "__fps_wrap_pthread_create", M);
-  PthreadCreate->replaceAllUsesWith(WrapPthreadCreate);
-  PthreadCreate->eraseFromParent();
-}
-
-void FunctionPrivateStacks::handleSjLj() {
-#if 0
-  auto *JmpBufTy = ArrayType::get(PtrTy, 5);
-  auto *NewStackContextTy = StructType::get(Ctx, {PtrTy, PtrTy});
-  
-  if (Function *SetjmpFn = M.getFunction("llvm.eh.sjlj.setjmp")) {
-    for (Use &SetjmpUse : SetjmpFn->uses()) {
-      IntrinsicInst *SetjmpCall = cast<IntrinsicInst>(SetjmpUse.getUser());
-      Value *JmpBuf = SetjmpCall->getArgOperand(0);
-      IRBuilder<> IRB(SetjmpCall);
-      Value *StackCtxPtr = IRB.CreateGEP2_32(JmpBufTy, JmpBuf, 0, 2);
-      Value *NewStackCtx = IRB.CreateAlloca(NewStackContextTy);
-      Value *OldStackCtx = IRB.CreateLoad(PtrTy, StackCtxPtr);
-      IBR.CreateStore(NewStackCtx, StackCtxPtr);
-      IRB.CreateStore(OldStackCtx, IRB.CreateStructGEP(NewStackContextTy, StackCtxPtr, 0));
-      Value *FPSStackCtx = IRB.CreateCall(M.getOrInsertFunction("__fps_ctx_alloc", FPSCtxAllocFTy));
-      IRB.CreateStore(FPSStackCtx, IRB.CreateStructGEP(NewStackContextTy, StackCtxPtr, 1));
-      SetjmpCall->setArgOperand(0, NewStackCtxPtr);
-    }
-  }
-
-  if (Function *LongjmpFn = M.getFunction("llvm.eh.sjlj.longjmp")) {
-    for (Use &LongjmpUse : LongjmpFn->uses()) {
-      IntrinsicInst *LongjmpCall = cast<IntrinsicInst>(LongjmpUse.getUser());
-      Value *JmpBuf = LongjmpCall->getArgOperand(0);
-      IRBuilder<> IRB(LongjmpCall);
-      Value *StackCtxPtr = IRB.CreateGEP2_32(JmpBufTy, 0, 2);
-      Value *NewStackCtx = IRB.CreateLoad(PtrTy, StackCtxPtr);
-      IRB.CreateStore(OldStackCtx, StackCtxPtr);
-      Value *OldStackCtx = IRB.CreateLoad(PtrTy, IRB.CreateStructGEP(NewStackContextTy, NewStackCtx, 0));
-      Value *FPSStackCtx = IRB.CreateLoad(PtrTy, IRB.CreateStructGEP(NewStackCotnextTy, NewStackCtx, 1));
-      IRB.CreateCall(M.getOrInsertFunction("__fps_ctx_restore", FPSCtxRestoreFTy), {FPSStackCtx});
-    }
-  }
-#endif
-#if 0
-
-  // NHM-FIXME: Get direct name?
-  if (Function *SetjmpFn = M.getFunction("llvm.eh.sjlj.setjmp")) {
-    for (Use &SetjmpUse : SetjmpFn->uses()) {
-      IRBuilder<> IRB(SetjmpUse.getUser());
-      
-    }
-  }
-#endif
-  
+  DtorIRB.CreateCall(DeregStack, {DtorIRB.CreateLoad(Int64Ty, StackIdxVar), FnName});
 }
 
 bool FunctionPrivateStacks::run() {
@@ -120,13 +65,13 @@ bool FunctionPrivateStacks::run() {
   new GlobalVariable(M, IntegerType::get(Ctx, 64), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stacksizes");
 
   auto *CtorTy = FunctionType::get(Type::getVoidTy(Ctx), {}, /*isVarArg*/false);
-  auto *Ctor = Function::Create(CtorTy, Function::PrivateLinkage, "__fps_regstack_ctor", M);
+  auto *Ctor = Function::Create(CtorTy, Function::InternalLinkage, "__fps_regstack_ctor", M);
   IRBuilder<> CtorIRB(BasicBlock::Create(Ctx, "", Ctor));
-  auto *Dtor = Function::Create(CtorTy, Function::PrivateLinkage, "__fps_regstack_dtor", M);
+  auto *Dtor = Function::Create(CtorTy, Function::InternalLinkage, "__fps_regstack_dtor", M);
   IRBuilder<> DtorIRB(BasicBlock::Create(Ctx, "", Dtor));
 
-  RegStack = Function::Create(FunctionType::get(Int64Ty, {}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_regstack", M);
-  DeregStack = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Int64Ty}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_deregstack", M);
+  RegStack = Function::Create(FunctionType::get(Int64Ty, {PtrTy}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_regstack", M);
+  DeregStack = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Int64Ty, PtrTy}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_deregstack", M);
   
   for (Function &F : M)
     if (!F.isDeclaration() && !F.getName().startswith("__fps_"))

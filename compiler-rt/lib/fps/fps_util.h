@@ -15,10 +15,11 @@
     }                                                           \
   } while (false)
 
-#define FPS_LOGGING 0
+#define FPS_LOGGING 1
 #if FPS_LOGGING
 # define FPS_LOG(...)                            \
   do {                                          \
+    fprintf(stderr, "[fps] ");                  \
     fprintf(stderr, __VA_ARGS__);               \
     fprintf(stderr, "\n");                      \
   } while (false)
