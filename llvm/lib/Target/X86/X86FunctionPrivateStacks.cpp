@@ -10,6 +10,7 @@
 #include "MCTargetDesc/X86BaseInfo.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/CodeGen/RegisterScavenging.h"
 
 using namespace llvm;
 
@@ -51,34 +52,6 @@ private:
   void instrumentSetjmps(MachineFunction &MF);
 };
 
-// NHM-FIXME: move this to shared
-// NHM-FIXME: Add remaining cases.
-int getMemoryOperandNo(const MachineInstr &MI) {
-  int i = X86II::getMemoryOperandNo(MI.getDesc().TSFlags);
-  if (i >= 0)
-    return i;
-  // NHM-FIXME: REMOVE
-  if (MI.getOpcode() == X86::TCRETURNmi64)
-    assert(X86II::isPseudo(MI.getDesc().TSFlags));
-  if (!X86II::isPseudo(MI.getDesc().TSFlags))
-    return -1;
-  switch (MI.getOpcode()) {
-  case X86::INLINEASM:
-  case X86::DBG_VALUE:
-    return -1;
-  case X86::TCRETURNmi64:
-    i = 0;
-    break;
-  case X86::VASTART_SAVE_XMM_REGS:
-    i = 1;
-    break;
-  default:
-    errs() << "unhandled pseudo-instruction: " << MI;
-    llvm_unreachable("Failed to handle pseudo instruction!"); // NHM-FIXME
-  }
-  return i + X86II::getOperandBias(MI.getDesc());
-}
-
 
 bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
   for (MachineBasicBlock &MBB : MF) {
@@ -86,7 +59,7 @@ bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, Machin
       for (MachineOperand &MO : MI.operands()) {
         if (!(MO.isFI() && MO.getIndex() == FI))
           continue;
-        const int MemRefBeginIdx = getMemoryOperandNo(MI);
+        const int MemRefBeginIdx = X86::getFirstAddrOperandIdx(MI);
         if (MemRefBeginIdx < 0)
           return false;
         if (MO.getOperandNo() != static_cast<unsigned>(MemRefBeginIdx))
@@ -172,9 +145,7 @@ void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
       if (!MI.isCall()) // NHM-FIXME: Are indirect calls considered to be indirect branches?
         continue;
       if (MI.mayLoadOrStore()) {
-        if (getMemoryOperandNo(MI) < 0)
-          errs() << "bad thingie: " << MI;
-        assert(getMemoryOperandNo(MI) >= 0);
+        assert(X86::getFirstAddrOperandIdx(MI) >= 0);
         continue;
       }
       const MachineOperand &MO = TII->getCalleeOperand(MI);

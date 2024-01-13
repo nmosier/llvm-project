@@ -15,7 +15,7 @@
     }                                                           \
   } while (false)
 
-#define FPS_LOGGING 1
+#define FPS_LOGGING 0
 #if FPS_LOGGING
 # define FPS_LOG(...)                            \
   do {                                          \

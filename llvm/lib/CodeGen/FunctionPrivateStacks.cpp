@@ -16,7 +16,7 @@ namespace llvm {
 
 // NHM-FIXME: Fixup flags.
 cl::opt<bool> EnableFunctionPrivateStacks(
-    "x86-fps", cl::init(false), cl::Hidden);
+    "x86-function-private-stacks", cl::init(false), cl::Hidden);
 }
 
 namespace {

@@ -176,6 +176,10 @@ public:
                              SmallVectorImpl<MCPhysReg> &Hints,
                              const MachineFunction &MF, const VirtRegMap *VRM,
                              const LiveRegMatrix *Matrix) const override;
+
+  bool requiresRegisterScavenging(const MachineFunction &MF) const override {
+    return true;
+  }
 };
 
 } // End llvm namespace

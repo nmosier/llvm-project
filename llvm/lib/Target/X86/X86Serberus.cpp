@@ -36,7 +36,7 @@ using llvm::X86::MachineGadgetGraph;
 #define DEBUG_TYPE PASS_KEY
 
 static cl::opt<bool> EnableSerberus(
-    PASS_KEY, cl::desc("Enable Serberus"), cl::init(false), cl::Hidden);
+    "x86-serberus-pass", cl::desc("Enable Serberus"), cl::init(false), cl::Hidden);
 
 static cl::opt<bool> NoConditionalBranches(
     PASS_KEY "-no-cbranch",
