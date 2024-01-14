@@ -97,6 +97,11 @@ inline void *unsafe_stack_alloc(size_t size, size_t guard) {
   return (char *)addr + guard;
 }
 
+extern "C" __attribute__((visibility("default"))) void *__fps_alloc(uint64_t size, uint64_t guard) {
+  // return unsafe_stack_alloc(size, guard);
+  return nullptr;
+}
+
 inline void unsafe_stack_setup(void *start, size_t size, size_t guard) {
   SFS_CHECK((char *)start + size >= (char *)start);
   SFS_CHECK((char *)start + guard >= (char *)start);

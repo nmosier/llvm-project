@@ -133,6 +133,9 @@ SANITIZER("kcfi", KCFI)
 // Safe Stack
 SANITIZER("safe-stack", SafeStack)
 
+// Function-Private Stacks
+SANITIZER("fps", FunctionPrivateStacks)
+
 // Shadow Call Stack
 SANITIZER("shadow-call-stack", ShadowCallStack)
 

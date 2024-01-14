@@ -234,6 +234,7 @@ FEATURE(is_union, LangOpts.CPlusPlus)
 FEATURE(kcfi, LangOpts.Sanitize.has(SanitizerKind::KCFI))
 FEATURE(modules, LangOpts.Modules)
 FEATURE(safe_stack, LangOpts.Sanitize.has(SanitizerKind::SafeStack))
+FEATURE(fps, LangOpts.Sanitize.has(SanitizerKind::FunctionPrivateStacks))
 FEATURE(shadow_call_stack,
         LangOpts.Sanitize.has(SanitizerKind::ShadowCallStack))
 FEATURE(tls, PP.getTargetInfo().isTLSSupported())

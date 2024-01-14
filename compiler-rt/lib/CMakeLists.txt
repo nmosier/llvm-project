@@ -42,6 +42,7 @@ if(COMPILER_RT_BUILD_SANITIZERS)
     add_subdirectory(ubsan)
   endif()
 
+  message("COMPILER_RT_SANITIZERS_TO_BUILD=${COMPILER_RT_SANITIZERS_TO_BUILD}")
   foreach(sanitizer ${COMPILER_RT_SANITIZERS_TO_BUILD})
     compiler_rt_build_runtime(${sanitizer})
   endforeach()

@@ -7,6 +7,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
+#include "MCTargetDesc/X86BaseInfo.h"
 
 using namespace llvm;
 
@@ -39,11 +40,70 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   auto *TII = STI.getInstrInfo();
   auto *TRI = STI.getRegisterInfo();
   auto &MFI = MF.getFrameInfo();
+  auto &MRI = MF.getRegInfo();
+
+  // NHM-FIXME: Make it an assert?
   if (TRI->hasBasePointer(MF))
     report_fatal_error("No function should have base pointer with FPS enabled!");
+  assert(MRI.reg_empty(X86::RBX) && "Expected no existing uses of RBX for functions requiring a private stack!");
+  
 
   MachineBasicBlock &EntryMBB = MF.front();
-  auto EntryMBBI = EntryMBB.begin();
+  MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
+  MF.push_front(&AllocMBB);
+  MachineBasicBlock &OverflowMBB = *MF.CreateMachineBasicBlock();
+  MF.push_back(&OverflowMBB);
+
+  // Functions with 'norecurse' attribute: access directly via thread-local variable.
+  // Otherwise, the following:
+  // .fps.alloc:
+  //   MOV rbx, [__fps_stackptr]
+  //   SUB rbx, <frame-size>
+  //   JB rbx, .fps.stackoverflow
+  //  .fps.clamp:
+  //   CMOVB rbx, [__fps_stackptr]
+  //   ...
+  
+  // .fps.stackoverflow:
+  //   CALL abort
+  //   LFENCE
+
+  auto *StackPtrSym = M.getNamedValue(StringRef(("__fps_stackptr_" + MF.getName()).str()));
+  assert(StackPtrSym && "Stack pointer global variable missing!");
+  DebugLoc Loc;
+
+  BuildMI(OverflowMBB, OverflowMBB.end(), Loc, TII->get(X86::TRAP)); // NHM-FIXME: Confirm this is what they do too.
+  TII->insertUnconditionalBranch(OverflowMBB, &EntryMBB, Loc);
+
+  const auto AllocMBBI = AllocMBB.begin();
+  BuildMI(AllocMBB, AllocMBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
+      .addReg(X86::NoRegister)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addGlobalAddress(StackPtrSym, 0, X86II::MO_TPOFF)
+      .addReg(X86::FS);
+  // NHM-FIXME: Use 8-bit vs. 32-bit depending on operand size.
+  BuildMI(AllocMBB, AllocMBBI, Loc, TII->get(X86::SUB64ri32), X86::RBX)
+      .addReg(X86::RBX)
+      .addImm(0); // NHM-FIXME: Fill in with actual size of course.
+  TII->insertBranch(AllocMBB, &OverflowMBB, &EntryMBB, {MachineOperand::CreateImm(X86::COND_B)}, Loc);
+  AllocMBB.addSuccessor(&OverflowMBB);
+  AllocMBB.addSuccessor(&EntryMBB);
+  for (auto &LI : EntryMBB.liveins())
+    AllocMBB.addLiveIn(LI);
+
+  // NHM-FIXME: Check if it tracks liveness.
+
+  //   CMP rbx, &__fps_stackend
+  //   
+  //   MOV [__fps_stackptr], rbx
+  
+
+  // .fps.1:
+  //   MOV rbx, [__fps_stackptr]
+  //   SUB rbx, <frame-size>
+  //   MOV rbx, [__
+  
 
   // BB1: 
   //   MOV rbx, [__fps_stackptr]
@@ -74,6 +134,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       .addReg(0);
 #endif
 
+#if 0
   auto *StackPtrSym = M.getNamedValue(StringRef(("__fps_stackptr_" + MF.getName()).str()));
 
   MachineBasicBlock &LoadMBB = *MF.CreateMachineBasicBlock();
@@ -134,6 +195,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     TII->loadRegFromStackSlot(AllocMBB, AllocMBBI, Info.Reg, Info.FI, Info.RC, TRI, X86::NoRegister);
   TII->insertUnconditionalBranch(AllocMBB, &EntryMBB, DebugLoc());
   AllocMBB.addSuccessor(&EntryMBB);
+#endif
 
   return true;
 }

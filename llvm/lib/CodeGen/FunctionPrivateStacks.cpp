@@ -6,6 +6,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/IR/Constants.h"
 
 using namespace llvm;
 
@@ -32,14 +33,14 @@ public:
 
 void FunctionPrivateStacks::runOnFunction(Function &F) {
   // NHM-FIXME: Assert only works on 64-bit architectures.
-  
-  // Create stack pointer and frame pointer global variables.
-  auto *PtrTy = PointerType::getUnqual(Ctx);
-  auto CreateGV = [&] (StringRef Stem) -> GlobalVariable * {
-    return new GlobalVariable(M, PtrTy, /*isConstant*/false, GlobalVariable::PrivateLinkage, Constant::getNullValue(PtrTy), "__fps_" + Stem + "_" + F.getName(), nullptr, GlobalVariable::GeneralDynamicTLSModel);
-  };
 
-  GlobalVariable *StackPtr = CreateGV("stackptr");
+  constexpr uint64_t StackSize = 1024 * 64; // 64KB per stack for now
+
+  const auto StackTy = ArrayType::get(IntegerType::get(Ctx, 8), StackSize);
+  auto *Stack = new GlobalVariable(M, StackTy, /*isConstant*/false, GlobalVariable::PrivateLinkage, Constant::getNullValue(StackTy), "__fps_stack_" + F.getName(), nullptr, GlobalVariable::InitialExecTLSModel);
+  
+  const auto StackPtrTy = IntegerType::get(Ctx, 32);
+  auto *StackPtr = new GlobalVariable(M, StackPtrTy, /*isConstant*/false, GlobalVariable::PrivateLinkage, ConstantInt::get(StackPtrTy, StackSize), "__fps_stackptr_" + F.getName(), nullptr, GlobalVariable::InitialExecTLSModel);
 }
 
 bool FunctionPrivateStacks::run() {

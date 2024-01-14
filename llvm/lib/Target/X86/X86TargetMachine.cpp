@@ -101,8 +101,9 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeX86Target() {
   initializePseudoProbeInserterPass(PR);
   initializeX86ReturnThunksPass(PR);
   initializeX86DAGToDAGISelPass(PR);
-  initializeX86ArgumentStackSlotPassPass(PR);
+  initializeX86ArgumentStackSlotPassPass(PR); // NHM-TODO: What does this pass do?
   initializeX86SerberusPassPass(PR);
+  initializeX86FunctionPrivateStacksPass(PR);
 }
 
 static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
@@ -552,6 +553,7 @@ void X86PassConfig::addPostRegAlloc() {
   // analyses needed by the LVIHardening pass when compiling at -O0.
   if (getOptLevel() != CodeGenOptLevel::None)
     addPass(createX86LoadValueInjectionLoadHardeningPass());
+  addPass(createX86FunctionPrivateStacksPass()); // NHM-FIXME: Probably need to move this elsewhere.  
 }
 
 void X86PassConfig::addPreSched2() {
