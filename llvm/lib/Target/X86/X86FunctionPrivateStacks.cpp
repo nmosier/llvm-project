@@ -213,6 +213,80 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
   const MachineRegisterInfo &MRI = MF.getRegInfo();
   MachineFrameInfo &MFI = MF.getFrameInfo();
 
+  auto getFreeReg = [&] (const LivePhysRegs &LPR) -> Register {
+    auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
+      return LPR.available(MRI, Reg);
+    });
+    if (it == std::end(X86::GR64RegClass))
+      return X86::NoRegister;
+    else
+      return *it;
+  };
+
+  auto hasFreeReg = [&] (const LivePhysRegs &LPR) -> bool {
+    return getFreeReg(LPR) != X86::NoRegister;
+  };
+
+  auto getSpillableReg = [&] (const LivePhysRegs &LPR) -> Register {
+    auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
+      if (LPR.contains(Reg))
+        return true;
+      if (MRI.isReserved(Reg))
+        return false;
+      for (MCRegAliasIterator R(Reg, TRI, false); R.isValid(); ++R)
+        if (LPR.contains(*R))
+          return true;
+      return false;
+    });
+    if (it == std::end(X86::GR64RegClass))
+      return X86::NoRegister;
+    else
+      return *it;
+  };
+
+  // NHM-FIXME: Should return full reg.n
+  auto getSpillRegs = [&] (const LivePhysRegs &LPR, SmallVectorImpl<Register> &SpillRegs) {
+    Register SpillRegFull = getSpillableReg(LPR);
+    if (LPR.contains(SpillRegFull)) {
+      SpillRegs.push_back(SpillRegFull);
+      return;
+    }
+    Register SpillReg32 = getX86SubSuperRegister(SpillRegFull, 32);
+    if (LPR.contains(SpillReg32)) {
+      SpillRegs.push_back(SpillReg32);
+      return;
+    }
+    Register SpillReg16 = getX86SubSuperRegister(SpillRegFull, 16);
+    if (LPR.contains(SpillReg16)) {
+      SpillRegs.push_back(SpillReg16);
+      return;
+    }
+    Register SpillReg8H = getX86SubSuperRegister(SpillRegFull, 8, /*High*/true);
+    if (LPR.contains(SpillReg8H))
+      SpillRegs.push_back(SpillReg8H);
+    Register SpillReg8L = getX86SubSuperRegister(SpillRegFull, 8, /*High*/false);
+    if (LPR.contains(SpillReg8L))
+      SpillRegs.push_back(SpillReg8L);
+  };
+
+  auto checkUses = [&] () {
+    for (MachineInstr *Use : Uses) {
+      MachineBasicBlock &MBB = *Use->getParent();
+      LivePhysRegs LPR(*TRI);
+      LPR.addLiveOuts(MBB);
+      for (MachineInstr &MI : reverse(MBB)) {
+        LPR.stepBackward(MI);
+        if (&MI == Use)
+          break;
+      }
+      if (!hasFreeReg(LPR)) {
+        LLVM_DEBUG(dbgs() << "use does not have free reg: " << *Use);
+      }
+      assert(hasFreeReg(LPR));
+    }
+  };
+  
+
   // Step 0: Guarantee that at least one register for PSP allocation at each PSP use.
   for (MachineInstr *Use : Uses) {
     MachineBasicBlock &MBB = *Use->getParent();
@@ -225,31 +299,89 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
         break;
     }
 
-    if (none_of(X86::GR64RegClass, [&] (MCPhysReg Reg) {
-      return LPR.available(MRI, Reg);
-    })) {
-      // Spill register.
-      auto RegToSpillIt = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) {
-        return none_of(Use->uses(), [&] (const MachineOperand &MO) {
-          return MO.isReg() && MO.isUse() && TRI->regsOverlap(MO.getReg(), Reg);
-        });
-      });
-      // NHM-FIXME: Should handle case where we have live subregs too.
-      if (RegToSpillIt == std::end(X86::GR64RegClass)) {
-        report_fatal_error("Can't find a register to spill!");
-      }
-      // NHM-FIXME: Rename.
-      MCPhysReg RegToSpill = *RegToSpillIt;
-      auto MBBI = Use->getIterator();
-      // NHM-FIXME: instead of hard-coding 8, should use TRI to get register size?
-      int FI = MFI.CreateSpillStackObject(8, Align(8));
-      TII->storeRegToStackSlot(MBB, MBBI, RegToSpill, true, FI, &X86::GR64RegClass, TRI, X86::NoRegister);
-      TII->loadRegFromStackSlot(MBB, std::next(MBBI), RegToSpill, FI, &X86::GR64RegClass, TRI, X86::NoRegister);
+    if (hasFreeReg(LPR))
+      continue;
+
+    // If it doesn't have a free register, we need to safely spill one.
+    // We can spill a register that is not used by the instruction.
+    if (Use->isCall())
+      report_fatal_error("PSP used in call instruction with no free regs");
+    SmallVector<std::pair<MCPhysReg, const MachineOperand *>> Clobbers;
+    // Remove uses.
+    for (const MachineOperand &MO : Use->operands()) // NHM-FIXME: uses()?
+      if (MO.isReg() && MO.isUse() && MO.getReg() != X86::NoRegister)
+        LPR.removeReg(MO.getReg());
+    SmallVector<Register> RegsToSpill;
+    getSpillRegs(LPR, RegsToSpill);
+    assert(!RegsToSpill.empty());
+    auto MBBI = Use->getIterator();
+    for (Register RegToSpill : RegsToSpill) {
+      const auto *RC = TRI->getMinimalPhysRegClass(RegToSpill);
+      unsigned SpillSize = TRI->getSpillSize(*RC);
+      int FI = MFI.CreateSpillStackObject(SpillSize, Align(SpillSize));
+      TII->storeRegToStackSlot(MBB, MBBI, RegToSpill, true, FI, RC, TRI, X86::NoRegister);
+      TII->loadRegFromStackSlot(MBB, std::next(MBBI), RegToSpill, FI, RC, TRI, X86::NoRegister);
+      // NHM-FIXME: Insert LFENCE + ZERO.
+      
+      LLVM_DEBUG(dbgs() << "spilled register " << TRI->getRegAsmName(RegToSpill) << " for instruction " << *Use);
     }
 
+#if 0
+    // NHM-FIXME: This is a good, general approach.
+    // However, I'm implemetnign sometghing simpler for now
+    // that should always work.
+    
+    // Find the closest place to spill.
+    LivePhysRegs SpillableRegs(*TRI);
+    for (MCPhysReg Reg : LPR)
+      SpillableRegs.addReg(Reg);
+    Register RegToSpill = X86::NoRegister;
+    MachineInstr *SpillBeforeMI = nullptr;
+    for (MachineInstr *MI = Use; MI; MI = MI->getPrevNode()) {
+      // Together, these remove both uses, defs, and clobbers, exactly what we need.
+      SmallVector<std::pair<MCPhysReg, const MachineOperand *>> Clobbers;
+      SpillableRegs.stepForward(*MI, Clobbers);
+      SpillableRegs.removeDefs(*MI);
+
+      LPR.stepBackward(*MI);
+
+      auto isSpillable = [&] (MCPhysReg Reg) -> bool {
+        if (SpillableRegs.contains(Reg))
+          return true;
+        if (MRI.isReserved(Reg))
+          return false;
+        for (MCRegAliasIterator R(Reg, TRI, false); R.isValid(); ++R)
+          if (SpillableRegs.contains(*R))
+            return true;
+        return false;
+      };      
+
+      if (hasFreeReg(LPR)) {
+        auto RegToSpillIt = find_if(X86::GR64RegClass, isSpillable);
+        if (RegToSpillIt == std::end(X86::GR64RegClass))
+          report_fatal_error("found free register but no spillable register!");
+        RegToSpill = *RegToSpillIt;
+        SpillBeforeMI = MI;
+        break;
+      }
+
+      if (none_of(X86::GR64RegClass, isSpillable))
+        report_fatal_error("no spillable registers left!");
+    }
+
+    assert(SpillBeforeMI);
+    assert(RegToSpill);
+
+    auto MBBI = SpillBeforeMI->getIterator();
+    int FI = MFI.CreateSpillStackObject(8, Align(8));
+    TII->storeRegToStackSlot(MBB, SpillBeforeMI->getIterator(), RegToSpill, true, FI, &X86::GR64RegClass, TRI, X86::NoRegister);
+    TII->loadRegFromStackSlot(MBB, std::next(Use->getIterator()), RegToSpill, FI, &X86::GR64RegClass, TRI, X86::NoRegister);
+#endif
+
+    
   }
 
-
+  checkUses();
 
   // Construct kils.
   SmallVector<MachineInstr *> Kills;
@@ -299,13 +431,42 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
     Kills.push_back(Tmp);
   }
 
+  checkUses();
+
+  MF.verify();
+
   SmallVector<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> InsertPts;
   partialRedundancyElimination(MF, Uses, Kills, InsertPts);
+
+  
 
 
   // Insert loads of PSP.
   for (const auto &[MBB, MBBI] : InsertPts) {
-    BuildMI(*MBB, MBBI, DebugLoc(), TII->get(X86::NOOP));
+    LivePhysRegs LPR(*TRI);
+#if 0
+    LPR.addLiveIns(*MBB);
+    for (auto LiveMBBI = MBB->begin(); LiveMBBI != MBBI; ++LiveMBBI) {
+      SmallVector<std::pair<MCPhysReg, const MachineOperand *>> Clobbers;
+      LPR.stepForward(*LiveMBBI, Clobbers);
+    }
+#else
+    // NHM-FIXME: Should be able to step forward too!
+    LPR.addLiveOuts(*MBB);
+    for (MachineInstr &MI : reverse(*MBB)) {
+      LPR.stepBackward(MI);
+      if (MI.getIterator() == MBBI)
+        break;
+    }
+#endif
+    
+    auto RegIt = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
+      return LPR.available(MRI, Reg);
+    });
+    assert(RegIt != std::end(X86::GR64RegClass));
+#if 0 // NHM-FIXME: Re-enable!
+    loadPrivateStackPointer(*MBB, MBBI, *RegIt);
+#endif
   }
   
 
