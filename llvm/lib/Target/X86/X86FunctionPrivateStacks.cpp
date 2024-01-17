@@ -11,6 +11,9 @@
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/CodeGen/RegAllocPBQP.h"
+#include "llvm/ADT/SmallSet.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 
 using namespace llvm;
 
@@ -30,6 +33,8 @@ class X86FunctionPrivateStacks : public MachineFunctionPass {
 public:
   static char ID;
 
+  FunctionPass *RegAllocPass;
+
   X86FunctionPrivateStacks() : MachineFunctionPass(ID) {
     initializeX86FunctionPrivateStacksPass(*PassRegistry::getPassRegistry());
   }
@@ -45,12 +50,270 @@ private:
   const GlobalValue *ThdStackPtrsSym;
 
   void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalValue *Member, Register Reg);
-  void loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
-  void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc = DebugLoc());
+  void loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
+  void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
 
   bool frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses);
   void instrumentSetjmps(MachineFunction &MF);
+
+  void partialRedundancyElimination(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, ArrayRef<MachineInstr *> Kills, SmallVectorImpl<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> &InsertPts);
+
+  void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses);
 };
+
+void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc) {
+  getPointerToFPSData(MBB, MBBI, Loc, ThdStackPtrsSym, Reg);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
+      .addReg(Reg)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::NoRegister);
+}
+
+void X86FunctionPrivateStacks::partialRedundancyElimination(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, ArrayRef<MachineInstr *> Kills, SmallVectorImpl<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> &InsertPts) {
+  struct InOut {
+    bool In;
+    bool Out;
+
+    bool operator==(const InOut &Other) const {
+      return In == Other.In && Out == Other.Out;
+    }
+  };
+
+  // ANTICIPATED EXPRESSIONS
+  std::map<MachineBasicBlock *, InOut> AnticipatedMBBs;
+  std::map<MachineInstr *, InOut> AnticipatedMIs;
+
+  // Iniitalize
+  for (MachineBasicBlock &MBB : MF) {
+    auto& AnticipatedMBB = AnticipatedMBBs[&MBB];
+    AnticipatedMBB.In = true;
+    AnticipatedMBB.Out = !MBB.succ_empty();
+    for (MachineInstr &MI : MBB) {
+      auto &AnticipatedMI = AnticipatedMIs[&MI];
+      AnticipatedMI.In = true;
+      AnticipatedMI.Out = true;
+    }
+  }
+
+  // Run data-flow
+  while (true) {
+    const auto BakMBBs = AnticipatedMBBs;
+    const auto BakMIs = AnticipatedMIs;
+
+    for (MachineBasicBlock &MBB : MF) {
+      auto &AnticipatedMBB = AnticipatedMBBs[&MBB];
+
+      // Meet OUT[MBB].
+      for (MachineBasicBlock *Succ : MBB.successors())
+        AnticipatedMBB.Out &= AnticipatedMBBs[Succ].In;
+
+      // Transfer instructions.
+      for (MachineInstr &MI : reverse(MBB)) {
+        auto &AnticipatedMI = AnticipatedMIs[&MI];
+
+        // Compute OUT.
+        if (MachineInstr *Succ = MI.getNextNode())
+          AnticipatedMI.Out = AnticipatedMIs[Succ].In;
+        else
+          AnticipatedMI.Out = AnticipatedMBB.Out;
+
+        // Transfer IN.
+        AnticipatedMI.In = AnticipatedMI.Out;
+        if (is_contained(Kills, &MI))
+          AnticipatedMI.In = false;
+        if (is_contained(Uses, &MI))
+          AnticipatedMI.In = true;
+      }
+
+      // Compute IN[MBB].
+      if (MBB.empty())
+        AnticipatedMBB.In = AnticipatedMBB.Out;
+      else
+        AnticipatedMBB.In = AnticipatedMIs[&MBB.front()].In;
+      
+    }
+
+    if (BakMBBs == AnticipatedMBBs && BakMIs == AnticipatedMIs)
+      break;
+  }
+
+
+  // AVAILBLE EXPRESSIONS
+  std::map<MachineBasicBlock *, InOut> AvailableMBBs;
+  std::map<MachineInstr *, InOut> AvailableMIs;
+
+  // Initialization.
+  for (MachineBasicBlock &MBB : MF) {
+    auto &AvailableMBB = AvailableMBBs[&MBB];
+    AvailableMBB.In = !MBB.pred_empty();
+    AvailableMBB.Out = true;
+    for (MachineInstr &MI : MBB) {
+      auto &AvailableMI = AvailableMIs[&MI];
+      AvailableMI.In = true;
+      AvailableMI.Out = true;
+    }
+  }
+
+  // Run data-flow
+  while (true) {
+    const auto BakMBBs = AvailableMBBs;
+    const auto BakMIs = AvailableMIs;
+
+    for (MachineBasicBlock &MBB : MF) {
+      auto &AvailableMBB = AvailableMBBs[&MBB];
+
+      // Meet IN[MBB].
+      for (MachineBasicBlock *Pred : MBB.predecessors())
+        AvailableMBB.In &= AvailableMBBs[Pred].Out;
+
+      // Transfer instructions.
+      for (MachineInstr &MI : MBB) {
+        auto &AvailableMI = AvailableMIs[&MI];
+        
+        // Compute IN[MI]
+        if (MachineInstr *Pred = MI.getPrevNode())
+          AvailableMI.In = AvailableMIs[Pred].Out;
+        else
+          AvailableMI.In = AvailableMBB.In;
+
+        // Transfer OUT[MI]
+        AvailableMI.Out = (AvailableMI.In || AnticipatedMIs[&MI].In) && !is_contained(Kills, &MI);
+      }
+
+      // Compute OUT[MBB]
+      if (MBB.empty())
+        AvailableMBB.Out = AvailableMBB.In;
+      else
+        AvailableMBB.Out = AvailableMIs[&MBB.back()].Out;
+    }
+
+    if (BakMBBs == AvailableMBBs && BakMIs == AvailableMIs)
+      break;
+  }
+  
+  // Find the final insertion points.
+  for (MachineBasicBlock &MBB : MF) {
+    if (MBB.empty()) {
+      if (AnticipatedMBBs[&MBB].In && !AvailableMBBs[&MBB].In)
+        InsertPts.emplace_back(&MBB, MBB.begin());
+    } else {
+      for (MachineInstr &MI : MBB) {
+        if (AnticipatedMIs[&MI].In && !AvailableMIs[&MI].In)
+          InsertPts.emplace_back(&MBB, MI.getIterator());
+      }
+    }
+  }
+  
+}
+
+void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
+ 
+  const MachineRegisterInfo &MRI = MF.getRegInfo();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+
+  // Step 0: Guarantee that at least one register for PSP allocation at each PSP use.
+  for (MachineInstr *Use : Uses) {
+    MachineBasicBlock &MBB = *Use->getParent();
+
+    LivePhysRegs LPR(*TRI);
+    LPR.addLiveOuts(MBB);
+    for (MachineInstr &MI : reverse(MBB)) {
+      LPR.stepBackward(MI);
+      if (&MI == Use)
+        break;
+    }
+
+    if (none_of(X86::GR64RegClass, [&] (MCPhysReg Reg) {
+      return LPR.available(MRI, Reg);
+    })) {
+      // Spill register.
+      auto RegToSpillIt = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) {
+        return none_of(Use->uses(), [&] (const MachineOperand &MO) {
+          return MO.isReg() && MO.isUse() && TRI->regsOverlap(MO.getReg(), Reg);
+        });
+      });
+      // NHM-FIXME: Should handle case where we have live subregs too.
+      if (RegToSpillIt == std::end(X86::GR64RegClass)) {
+        report_fatal_error("Can't find a register to spill!");
+      }
+      // NHM-FIXME: Rename.
+      MCPhysReg RegToSpill = *RegToSpillIt;
+      auto MBBI = Use->getIterator();
+      // NHM-FIXME: instead of hard-coding 8, should use TRI to get register size?
+      int FI = MFI.CreateSpillStackObject(8, Align(8));
+      TII->storeRegToStackSlot(MBB, MBBI, RegToSpill, true, FI, &X86::GR64RegClass, TRI, X86::NoRegister);
+      TII->loadRegFromStackSlot(MBB, std::next(MBBI), RegToSpill, FI, &X86::GR64RegClass, TRI, X86::NoRegister);
+    }
+
+  }
+
+
+
+  // Construct kils.
+  SmallVector<MachineInstr *> Kills;
+  SmallVector<MachineInstr *> Tmps;
+  SmallSet<MachineBasicBlock *, 8> KilledOnEntry;
+  for (MachineBasicBlock &MBB : MF) {
+    LivePhysRegs LPR(*TRI);
+    LPR.addLiveOuts(MBB);
+
+    auto hasFreeReg = [&] (const LivePhysRegs &LPR) -> bool {
+      return any_of(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
+        return LPR.available(MRI, Reg);
+      });
+    };
+
+    for (MachineInstr &MI : reverse(MBB)) {
+      // If no registers are free, then treat it as kill.
+      LPR.addUses(MI);
+      if (!hasFreeReg(LPR))
+        Kills.push_back(&MI);
+
+      // Calls are always kills.
+      if (MI.isCall())
+        Kills.push_back(&MI);
+
+      LPR.stepBackward(MI);
+    }
+
+    if (MBB.hasAddressTaken())
+      KilledOnEntry.insert(&MBB);
+
+    // Check live ins.
+    LPR.clear();
+    LPR.addLiveIns(MBB);
+    for (MachineBasicBlock *Pred : MBB.predecessors())
+      LPR.addLiveOuts(*Pred);
+    if (!hasFreeReg(LPR))
+      KilledOnEntry.insert(&MBB);
+  }
+  if (const MachineJumpTableInfo *JTI = MF.getJumpTableInfo())
+    for (const MachineJumpTableEntry &JTE : JTI->getJumpTables())
+      for (MachineBasicBlock *MBB : JTE.MBBs)
+        KilledOnEntry.insert(MBB);
+  for (MachineBasicBlock *MBB : KilledOnEntry) {
+    MachineInstr *Tmp = BuildMI(*MBB, MBB->begin(), DebugLoc(), TII->get(X86::NOOP));
+    Tmps.push_back(Tmp);
+    Kills.push_back(Tmp);
+  }
+
+  SmallVector<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> InsertPts;
+  partialRedundancyElimination(MF, Uses, Kills, InsertPts);
+
+
+  // Insert loads of PSP.
+  for (const auto &[MBB, MBBI] : InsertPts) {
+    BuildMI(*MBB, MBBI, DebugLoc(), TII->get(X86::NOOP));
+  }
+  
+
+  // Erase temporary instructions.
+  // NOTE: This should go last.
+  for (MachineInstr *Tmp : Tmps)
+    Tmp->eraseFromParent();
+}
 
 
 bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
@@ -180,13 +443,8 @@ void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
 }
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
-  if (!EnableFunctionPrivateStacks || MF.getName().startswith("__fps_"))
+  if (!EnableFunctionPrivateStacks || MF.getName().starts_with("__fps_"))
     return false;
-
-  if (MF.getName().contains("harrisKernel")) {
-    errs() << "===== BEFORE =====\n";
-    MF.dump();
-  }
 
   TM = &MF.getTarget();
 
@@ -203,9 +461,10 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   // NHM-FIXME: Make it an assert?
   if (TRI->hasBasePointer(MF))
     report_fatal_error("No function should have base pointer with FPS enabled!");
+#if 0
   assert(MRI.reg_empty(X86::RBX) && "Expected no existing uses of RBX for functions requiring a private stack!");
+#endif
   assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
-
 
   StackIdxSym = M.getNamedValue(("__fps_stackidx_" + MF.getName()).str());
   ThdStackPtrsSym = M.getNamedValue("__fps_thd_stackptrs");
@@ -214,6 +473,8 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
   DebugLoc Loc;
 
+  DenseMap<int, uint64_t> PrivateFrameInfo;
+  SmallVector<MachineInstr *> PrivateFrameAccesses;
   uint64_t PrivateFrameSize = 0;
   Align PrivateFrameAlign;
   for (int FI = MFI->getObjectIndexBegin(); FI < MFI->getObjectIndexEnd(); ++FI) {
@@ -230,7 +491,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     Align ObjAlign = MFI->getObjectAlign(FI);
     PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
     PrivateFrameSize = llvm::alignTo(PrivateFrameSize, ObjAlign);
-    const auto PrivateFrameOffset = PrivateFrameSize;
+    PrivateFrameInfo[FI] = PrivateFrameSize;
     assert(MFI->getObjectSize(FI) > 0);
     PrivateFrameSize += MFI->getObjectSize(FI);
 
@@ -244,13 +505,20 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
       MachineOperand &DispOp = MI->getOperand(MemRefIdxBegin + X86::AddrDisp);
       MachineOperand &SegmentOp = MI->getOperand(MemRefIdxBegin + X86::AddrSegmentReg);
 
+#if 0
       BaseOp.ChangeToRegister(X86::RBX, /*isDef*/false);
       DispOp.setImm(DispOp.getImm() + PrivateFrameOffset);
+#endif
+      PrivateFrameAccesses.push_back(MI);
     }
   }
   PrivateFrameSize = llvm::alignTo(PrivateFrameSize, PrivateFrameAlign);
 
 
+  // Collect restore points for stack pointer.
+  assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses);
+
+#if 0
   // PROLOGUE: Private stack frame setup on function entry.
   MachineBasicBlock &EntryMBB = MF.front();
   MachineBasicBlock::iterator EntryMBBI = EntryMBB.begin();
@@ -329,6 +597,10 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
         .addReg(X86::NoRegister)
         .addReg(X86::RBX);
   }
+#endif
+
+
+  // ======== ALL THIS STUFF IS FOR REFERENCE ONLY ========= //
   
 #if 0
   MachineBasicBlock &EntryMBB = MF.front();
@@ -599,12 +871,6 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
   instrumentSetjmps(MF);
 
-
-  if (MF.getName().contains("harrisKernel")) {
-    errs() << "===== AFTER =====\n";
-    MF.dump();
-  }
-  
   return true;
 }
 

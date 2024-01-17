@@ -629,7 +629,7 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   }
 
   // NHM-FIXME: Check if we even need a function-private stack.
-  if (EnableFunctionPrivateStacks) {
+  if (EnableFunctionPrivateStacks && false) {
     assert(Is64Bit && "Function-Private Stacks only supported in 64-bit mode!");
     for (MCRegAliasIterator AI(X86::RBX, this, true); AI.isValid(); ++AI)
       Reserved.set(*AI);

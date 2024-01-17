@@ -74,7 +74,7 @@ bool FunctionPrivateStacks::run() {
   DeregStack = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Int64Ty, PtrTy}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_deregstack", M);
   
   for (Function &F : M)
-    if (!F.isDeclaration() && !F.getName().startswith("__fps_"))
+    if (!F.isDeclaration() && !F.getName().starts_with("__fps_"))
       runOnFunction(F, CtorIRB, DtorIRB);
 
   CtorIRB.CreateRetVoid();

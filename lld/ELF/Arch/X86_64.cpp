@@ -794,7 +794,6 @@ void X86_64::relocate(uint8_t *loc, const Relocation &rel, uint64_t val) const {
   case R_X86_64_64:
   case R_X86_64_TPOFF64:
   case R_X86_64_DTPOFF64:
-  case R_X86_64_TPOFF64:
   case R_X86_64_PC64:
   case R_X86_64_SIZE64:
   case R_X86_64_GOT64:
