@@ -87,6 +87,24 @@ static bool getFreeRegs(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI,
   return false;
 }
 
+static MCPhysReg getSpillableReg(const LivePhysRegs &LPR, const TargetRegisterInfo *TRI, const MachineRegisterInfo &MRI) {
+    auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
+      if (LPR.contains(Reg))
+        return true;
+      if (MRI.isReserved(Reg))
+        return false;
+      for (MCRegAliasIterator R(Reg, TRI, false); R.isValid(); ++R)
+        if (LPR.contains(*R))
+          return true;
+      return false;
+    });
+    if (it == std::end(X86::GR64RegClass))
+      return X86::NoRegister;
+    else
+      return *it;
+  };
+
+
 void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
   MachineBasicBlock &MBB = MF.front();
   const auto &MRI = MF.getRegInfo();
@@ -169,7 +187,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
       MCPhysReg PSPReg = X86::NoRegister;
       auto it2 = std::find_if(std::next(it1), Nodes.end(), isKill);
       --it2;
-      MachineBasicBlock::iterator PreScavengeIt, PostScavengeIt;
+      MachineBasicBlock::iterator PreScavengeIt, PostScavengeIt, FirstUseIt;
       while (true) {
         // Try to use reg scavenger.
         RegScavenger RS;
@@ -180,6 +198,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
         RS.backward(PostScavengeIt);
         PSPReg = RS.scavengeRegisterBackwards(X86::GR64RegClass, (**it1).getIterator(), /*RestoreAfter*/false, /*SPAdj*/0, /*AllowSpill*/true, /*EliminateFrameIndex*/false);
         if (PSPReg != X86::NoRegister) {
+          FirstUseIt = (**it1).getIterator();
           it1 = it2;
           break;
         }
@@ -204,6 +223,76 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
             .addImm(0);
         BuildMI(MBB, PostScavengeIt, DebugLoc(), TII->get(X86::LFENCE));
       }
+
+      // Load private stack pointer.
+      LivePhysRegs LPR(*TRI);
+      LPR.addLiveOuts(MBB);
+      for (MachineInstr &MI : reverse(MBB)) {
+        LPR.stepBackward(MI);
+        if (MI.getIterator() == FirstUseIt)
+          break;
+      }
+      assert(LPR.available(MRI, PSPReg));
+      const bool LiveEFLAGS = LPR.contains(X86::EFLAGS);
+
+      if (LiveEFLAGS) {
+        MCPhysReg ScratchReg = getFreeReg(LPR, MRI, /*IgnoreRegs*/{PSPReg});
+        bool Spill = (ScratchReg == X86::NoRegister);
+        int SpillFI = -1;
+        auto MBBI = FirstUseIt;
+        if (Spill) {
+          // Evict a spillable register.
+          for (const MachineOperand &MO : FirstUseIt->operands())
+            if (MO.isReg() && MO.isUse() && MO.getReg())
+              LPR.removeReg(MO.getReg());
+          ScratchReg = getSpillableReg(LPR, TRI, MRI);
+          if (!ScratchReg)
+            report_fatal_error("Failed to get spillable register for live EFLAGS!");
+
+          SpillFI = MFI.CreateSpillStackObject(8, Align(8));
+
+          // Insert spill to stack.
+          TII->storeRegToStackSlot(MBB, MBBI, ScratchReg, /*isKill*/true, SpillFI, &X86::GR64RegClass, TRI, X86::NoRegister);
+        }
+
+        // Emit PSP reload code.
+        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), ScratchReg)
+            .addReg(X86::RIP)
+            .addImm(1)
+            .addReg(X86::NoRegister)
+            .addGlobalAddress(StackIdxSym)
+            .addReg(X86::NoRegister);
+        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
+            .addReg(X86::NoRegister)
+            .addImm(1)
+            .addReg(X86::NoRegister)
+            .addGlobalAddress(ThdStackPtrsSym, 0, X86II::MO_DTPOFF)
+            .addReg(X86::FS);
+        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
+            .addReg(ScratchReg)
+            .addImm(1)
+            .addReg(PSPReg)
+            .addImm(0)
+            .addReg(X86::NoRegister);
+
+        if (Spill) {
+          // Restore scratch register.
+          TII->loadRegFromStackSlot(MBB, MBBI, ScratchReg, SpillFI, &X86::GR64RegClass, TRI, X86::NoRegister);
+          BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mi32))
+              .addFrameIndex(SpillFI)
+              .addImm(1)
+              .addReg(X86::NoRegister)
+              .addImm(0)
+              .addReg(X86::NoRegister)
+              .addImm(0);
+          BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::LFENCE));
+        }
+        
+      } else {
+        loadPrivateStackPointer(MBB, FirstUseIt, PSPReg);
+      }
+      // TODO: Fix case with live eflags.
+      
 
       ++it1;
     }
