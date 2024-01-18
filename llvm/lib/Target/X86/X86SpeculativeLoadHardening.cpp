@@ -221,6 +221,7 @@ void X86SpeculativeLoadHardeningPass::getAnalysisUsage(
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
+// NHM-FIXME: Consider factoring this out to have shared edge-splitting code.
 static MachineBasicBlock &splitEdge(MachineBasicBlock &MBB,
                                     MachineBasicBlock &Succ, int SuccCount,
                                     MachineInstr *Br, MachineInstr *&UncondBr,

@@ -63,9 +63,221 @@ private:
   void partialRedundancyElimination(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, ArrayRef<MachineInstr *> Kills, SmallVectorImpl<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> &InsertPts);
 
   void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses);
+  void emitPrologue(MachineFunction &MF, ArrayRef<MachineInstr *> Uses);
 
   void makeRegsAvailable(MachineBasicBlock &MBB, MachineBasicBlock::iterator &MBBI, SmallVectorImpl<MCPhysReg> &FreeRegs, unsigned NumRegsRequired, bool SpillAfter);
 };
+
+static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
+  for (MCPhysReg Reg : X86::GR64RegClass)
+    if (LPR.available(MRI, Reg) && !is_contained(IgnoreRegs, Reg))
+      return Reg;
+  return X86::NoRegister;
+}
+
+static bool getFreeRegs(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, unsigned NumFreeRegs, SmallVectorImpl<MCPhysReg> &FreeRegs) {
+  for (MCPhysReg Reg : X86::GR64RegClass) {
+    if (LPR.available(MRI, Reg)) {
+      FreeRegs.push_back(Reg);
+      if (FreeRegs.size() == NumFreeRegs)
+        return true;
+    }
+  }
+  assert(FreeRegs.size() < NumFreeRegs);
+  return false;
+}
+
+void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
+  MachineBasicBlock &MBB = MF.front();
+  const auto &MRI = MF.getRegInfo();
+
+  SmallVector<MachineInstr *> PrologueUses;
+  for (MachineInstr &MI : MBB) {
+    if (MI.isCall())
+      break;
+    if (is_contained(Uses, &MI))
+      PrologueUses.push_back(&MI);
+  }
+
+  MCPhysReg PSPAddrReg = X86::NoRegister;
+  MCPhysReg PSPValueReg = X86::NoRegister;
+
+  LivePhysRegs LPR(*TRI);
+  LPR.addLiveIns(MBB);
+
+  if (PrologueUses.empty()) {
+    // Just pick any two free registers.
+    SmallVector<MCPhysReg, 2> FreeRegs;
+    if (!getFreeRegs(LPR, MRI, 2, FreeRegs))
+      report_fatal_error("Failed to find 2 free regs at function entrypoint!");
+    PSPAddrReg = FreeRegs[0];
+    PSPValueReg = FreeRegs[1];
+  } else {
+    // Let RegScavenger pick a value register.
+    RegScavenger RS;
+    RS.enterBasicBlockEnd(MBB);
+
+    for (MachineInstr *Use : reverse(PrologueUses)) {
+      if (Use == &MBB.front()) {
+        PSPValueReg = getFreeReg(LPR, MRI);
+        if (PSPValueReg == X86::NoRegister)
+          report_fatal_error("Failed to get free register!");
+        break;
+      }
+      
+      RS.backward(Use->getIterator());
+      PSPValueReg = RS.scavengeRegisterBackwards(X86::GR64RegClass, MBB.begin(), /*RestoreAfter*/true, /*AllowSpill*/true, /*EliminateFrameIndex*/false);
+      if (PSPValueReg != X86::NoRegister)
+        break;
+    }
+
+    if (PSPValueReg == X86::NoRegister)
+      report_fatal_error("Failed to scavenge register!");
+  }
+  
+  
+}
+
+void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
+  const auto &MRI = MF.getRegInfo();
+  auto &MFI = MF.getFrameInfo();
+
+  // For now, just try running Register Scavenger on all windows.
+  for (MachineBasicBlock &MBB : MF) {
+    int ScavengedFI = MFI.CreateSpillStackObject(8, Align(8));
+    
+    // Find all use-use ranges.
+    SmallVector<MachineInstr *> Nodes; // Uses or kills.
+    auto isUse = [&] (MachineInstr *MI) {
+      return is_contained(Uses, MI);
+    };
+    auto isKill = [&] (MachineInstr *MI) {
+      return MI->isCall();
+    };
+    for (MachineInstr &MI : MBB)
+      if (isUse(&MI) || isKill(&MI))
+        Nodes.push_back(&MI);
+
+
+    auto it1 = Nodes.begin();
+    while (true) {
+      it1 = std::find_if(it1, Nodes.end(), isUse);
+      if (it1 == Nodes.end())
+        break;
+
+      // Find last use.
+      MCPhysReg PSPAddrReg, PSPValueReg;
+      auto it2 = std::find_if(std::next(it1), Nodes.end(), isKill);
+      --it2;
+      while (true) {
+        // If we have no window, handle code specially.
+#if 0
+        if (it1 == it2) {
+          LivePhysRegs LPR(*TRI);
+          LPR.addLiveOuts(MBB);
+          for (MachineInstr &MI : reverse(MBB)) {
+            LPR.stepBackward(MI);
+            if (&MI == *it2)
+              break;
+          }
+          PSPAddrReg = PSPValueReg = getFreeReg(LPR, MRI);
+          if (PSPAddrReg == X86::NoRegister)
+            report_fatal_error("Failed to get free register for reloading PSP at isolated use!");
+          break;
+        }
+#endif
+
+        // Try to use reg scavenger.
+        RegScavenger RS;
+        RS.addScavengingFrameIndex(ScavengedFI);
+        RS.enterBasicBlockEnd(MBB);
+        RS.backward(std::next((**it2).getIterator()));
+        PSPValueReg = RS.scavengeRegisterBackwards(X86::GR64RegClass, (**it1).getIterator(), /*RestoreAfter*/false, /*SPAdj*/0, /*AllowSpill*/true, /*EliminateFrameIndex*/false);
+        if (PSPValueReg != X86::NoRegister) {
+          it1 = it2;
+          break;
+        }
+
+        if (it1 == it2)
+          report_fatal_error("Failed to scavenge register around a single instruction");
+
+        --it2;
+        assert(isUse(*it2));
+      }
+
+      ++it1;
+    }
+    
+  }
+}
+
+#if 0
+void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
+  assert(none_of(Uses, [] (const MachineInstr *MI) {
+    return MI->isCall() || MI->isTerminator();
+  }));
+
+  const auto &MRI = MF.getRegInfo();
+  
+  // Approach (not optimal!):
+  // We will just take a basic-block-wise approach for now.
+  // Break each basic block into slices [it1, it2], where it1 is the iterator following a KILL and it2 is the iterator before a USE.
+  // No intervening insturctions (it1, it2) are KILLs. Also, the range is maximal.
+
+  // PROLOGUE
+  MachineBasicBlock &EntryMBB = MF.front();
+  auto EntryMBBI = EntryMBB.begin();
+  LivePhysRegs EntryLPR(*TRI);
+  EntryLPR.addLiveIns(EntryMBB);
+
+  // Allocate a register for the private stack pointer itself.
+  auto findLastForwardUse = [&] (MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI) {
+    MachineBasicBlock::iterator UseMBBI = MBB.end();
+    for (auto it = MBBI; it != MBB.end(); ++it) {
+      MachineInstr &MI = *it;
+      if (is_contained(Uses, &MI))
+        UseMBBI = it;
+      if (MI.isCall())
+        break;
+    }
+    return UseMBBI;
+  };
+
+  auto getUsesInMBB = [&] (MachineBasicBlock &MBB, SmallVectorImpl<MachineInstr *>& Out) {
+    for (MachineInstr &MI : MBB)
+      if (is_contained(Uses, &MI))
+        Out.push_back(&MI);
+  };
+
+  SmallVector<MachineInstr *> EntryUses;
+  getUsesInMBB(EntryMBB, EntryUses);
+  MCPhysReg PSPAddrReg, PSPValueReg;
+  if (EntryUses.empty()) {
+    // Pick any two free registers.
+    SmallVector<MCPhysReg, 2> FreeRegs;
+    if (!getFreeRegs(EntryLPR, MRI, 2, FreeRegs))
+      report_fatal_error("Failed to find 2 free regs at function entrypoint!");
+  } else {
+    // Let RegScavenger pick a register first. Then we'll pick another free register.
+    RegScavenger RS;
+    RS.enterBasicBlockEnd(EntryMBB);
+    RS.backward(EntryUseMBBI);
+    if (EntryMBBI == EntryUseMBBI) {
+      PSPValueReg = getFreeReg(EntryLPR, MRI);
+      if (PSPValueReg == X86::NoRegister)
+        report_fatal_error("Failed to get scratch value register for prologue!");
+    } else {
+      PSPValueReg = RS.scavengeRegisterBackwards(X86::GR64RegClass, EntryMBBI, /*RestoreAfter*/true, /*AllowSpill*/true, /*EliminateFrameIndex*/false);
+      if (PSPValueReg == X86::NoRegister)
+        report_fatal_error("Failed to scavenge value register for prologue!");
+    }
+    PSPAddrReg = getFreeReg(EntryLPR, MRI, {PSPValueReg});
+    if (PSPAddrReg == X86::NoRegister)
+      report_fatal_error("Failed to get scratch pointer register for prologue!");
+  }
+ 
+}
+#endif
 
 void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc) {
   getPointerToFPSData(MBB, MBBI, Loc, ThdStackPtrsSym, Reg);
@@ -310,6 +522,7 @@ void X86FunctionPrivateStacks::partialRedundancyElimination(MachineFunction &MF,
   
 }
 
+#if 0
 void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
  
   const MachineRegisterInfo &MRI = MF.getRegInfo();
@@ -547,6 +760,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
   for (MachineInstr *Tmp : Tmps)
     Tmp->eraseFromParent();
 }
+#endif
 
 
 bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
@@ -750,6 +964,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
   // Collect restore points for stack pointer.
   assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses);
+  // emitPrologue(MF, PrivateFrameAccesses);
 
 #if 0
   // PROLOGUE: Private stack frame setup on function entry.

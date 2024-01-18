@@ -141,7 +141,8 @@ public:
   Register scavengeRegisterBackwards(const TargetRegisterClass &RC,
                                      MachineBasicBlock::iterator To,
                                      bool RestoreAfter, int SPAdj,
-                                     bool AllowSpill = true);
+                                     bool AllowSpill = true,
+                                     bool eliminateFrameIndex = true);
 
   /// Tell the scavenger a register is used.
   void setRegUsed(Register Reg, LaneBitmask LaneMask = LaneBitmask::getAll());
@@ -157,7 +158,8 @@ private:
   /// \p UseMI.
   ScavengedInfo &spill(Register Reg, const TargetRegisterClass &RC, int SPAdj,
                        MachineBasicBlock::iterator Before,
-                       MachineBasicBlock::iterator &UseMI);
+                       MachineBasicBlock::iterator &UseMI,
+                       bool EliminateFrameIndex);
 };
 
 /// Replaces all frame index virtual registers with physical registers. Uses the
