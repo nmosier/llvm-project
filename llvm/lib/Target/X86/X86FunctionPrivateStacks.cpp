@@ -166,34 +166,20 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
         break;
 
       // Find last use.
-      MCPhysReg PSPAddrReg, PSPValueReg;
+      MCPhysReg PSPReg = X86::NoRegister;
       auto it2 = std::find_if(std::next(it1), Nodes.end(), isKill);
       --it2;
+      MachineBasicBlock::iterator PreScavengeIt, PostScavengeIt;
       while (true) {
-        // If we have no window, handle code specially.
-#if 0
-        if (it1 == it2) {
-          LivePhysRegs LPR(*TRI);
-          LPR.addLiveOuts(MBB);
-          for (MachineInstr &MI : reverse(MBB)) {
-            LPR.stepBackward(MI);
-            if (&MI == *it2)
-              break;
-          }
-          PSPAddrReg = PSPValueReg = getFreeReg(LPR, MRI);
-          if (PSPAddrReg == X86::NoRegister)
-            report_fatal_error("Failed to get free register for reloading PSP at isolated use!");
-          break;
-        }
-#endif
-
         // Try to use reg scavenger.
         RegScavenger RS;
         RS.addScavengingFrameIndex(ScavengedFI);
         RS.enterBasicBlockEnd(MBB);
-        RS.backward(std::next((**it2).getIterator()));
-        PSPValueReg = RS.scavengeRegisterBackwards(X86::GR64RegClass, (**it1).getIterator(), /*RestoreAfter*/false, /*SPAdj*/0, /*AllowSpill*/true, /*EliminateFrameIndex*/false);
-        if (PSPValueReg != X86::NoRegister) {
+        PreScavengeIt = (**it2).getIterator();
+        PostScavengeIt = std::next(PreScavengeIt);
+        RS.backward(PostScavengeIt);
+        PSPReg = RS.scavengeRegisterBackwards(X86::GR64RegClass, (**it1).getIterator(), /*RestoreAfter*/false, /*SPAdj*/0, /*AllowSpill*/true, /*EliminateFrameIndex*/false);
+        if (PSPReg != X86::NoRegister) {
           it1 = it2;
           break;
         }
@@ -203,6 +189,20 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
 
         --it2;
         assert(isUse(*it2));
+      }
+
+      assert(PSPReg != X86::NoRegister);
+
+      // Zero out emergency stack slot, if necessary.
+      if (std::next(PreScavengeIt) != PostScavengeIt) {
+        BuildMI(MBB, PostScavengeIt, DebugLoc(), TII->get(X86::MOV64mi32))
+            .addFrameIndex(ScavengedFI)
+            .addImm(1)
+            .addReg(X86::NoRegister)
+            .addImm(0)
+            .addReg(X86::NoRegister)
+            .addImm(0);
+        BuildMI(MBB, PostScavengeIt, DebugLoc(), TII->get(X86::LFENCE));
       }
 
       ++it1;
