@@ -225,7 +225,6 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack(const 
   const size_t index = getUnusedIndex();
   const size_t stacksize = kDefaultFPSSize;
   const size_t guardsize = getpagesize(); // NHM-FIXME
-  fprintf(stderr, "[%d] registering %s\n", safestack::GetTid(), name);
   FPS_LOG("registering %s (%" PRIu64 ")", name, index);
   names[index] = name;
   for (LiveThread *thread = live_threads; thread; thread = thread->next)

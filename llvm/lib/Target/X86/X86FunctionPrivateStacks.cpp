@@ -119,7 +119,7 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
     report_fatal_error("Failed to get free registers for FPS prologue!");
   assert(Regs.size() == 2);
   assert(!LPR.contains(X86::EFLAGS));
-
+  
   getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStackPtrsSym, Regs[0]);
   BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
       .addReg(Regs[0])
@@ -279,18 +279,28 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
         }
 
         // Emit PSP reload code.
-        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), ScratchReg)
+        // MOV r1, [rip+gottpoff(__fps_thd_stackptrs@gottpoff)]
+        // MOV r1, fs:[r1]
+        // MOV r2, [rip+__stackidx_<fn>]
+        DebugLoc Loc;
+        BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
+            .addReg(X86::RIP)
+            .addImm(1)
+            .addReg(X86::NoRegister)
+            .addGlobalAddress(ThdStackPtrsSym, 0, X86II::MO_GOTTPOFF)
+            .addReg(X86::NoRegister);
+        BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
+            .addReg(ScratchReg)
+            .addImm(1)
+            .addReg(X86::NoRegister)
+            .addImm(0)
+            .addReg(X86::FS);
+        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
             .addReg(X86::RIP)
             .addImm(1)
             .addReg(X86::NoRegister)
             .addGlobalAddress(StackIdxSym)
             .addReg(X86::NoRegister);
-        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
-            .addReg(X86::NoRegister)
-            .addImm(1)
-            .addReg(X86::NoRegister)
-            .addGlobalAddress(ThdStackPtrsSym, 0, X86II::MO_DTPOFF)
-            .addReg(X86::FS);
         BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
             .addReg(ScratchReg)
             .addImm(1)
@@ -367,21 +377,28 @@ bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, Machin
 }
 
 void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalValue *Member, Register Reg) {
-  // MOV reg, [__fps_stackidx_<fn>] // NOTE: We should have already pre-scaled this in the FPS sanitizer runtime.
-  // ADD reg, fs:[dtpoff(__fps_thd_stack<memb>)]
+  // MOV reg, [rip+gottpoff(__fps_thd_stackptrs@gottpoff)]
+  // MOV reg, fs:[reg]
+  // ADD reg, [rip+__stackidx_<fn>]
   BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
+      .addReg(X86::RIP)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addGlobalAddress(Member, 0, X86II::MO_GOTTPOFF)
+      .addReg(X86::NoRegister);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
+      .addReg(Reg)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::FS);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::ADD64rm), Reg)
+      .addReg(Reg)
       .addReg(X86::RIP)
       .addImm(1)
       .addReg(X86::NoRegister)
       .addGlobalAddress(StackIdxSym)
       .addReg(X86::NoRegister);
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::ADD64rm), Reg)
-      .addReg(Reg)
-      .addReg(X86::NoRegister)
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addGlobalAddress(Member, 0, X86II::MO_DTPOFF)
-      .addReg(X86::FS);
 }
 
 void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
@@ -543,226 +560,8 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     const MachineOperand &BaseMO = MI->getOperand(MemRefIdx + X86::AddrBaseReg);
     assert(BaseMO.isReg());
   }
-    
-
-#if 0
-  // PROLOGUE: Private stack frame setup on function entry.
-  MachineBasicBlock &EntryMBB = MF.front();
-  MachineBasicBlock::iterator EntryMBBI = EntryMBB.begin();
-
-  getPointerToFPSData(EntryMBB, EntryMBBI, Loc, ThdStackPtrsSym, X86::R15);
-  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
-      .addReg(X86::R15)
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(0)
-      .addReg(X86::NoRegister);
-  // NHM-NOTE: Could also just sub from memory directly using SUB64mi32. Saves opcode bytes maybe + registers.
-  // NHM-FIXME: Be smart about 8/32.
-  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::SUB64ri32), X86::RBX)
-      .addReg(X86::RBX)
-      .addImm(PrivateFrameSize);
-  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64mr))
-      .addReg(X86::R15)
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(0)
-      .addReg(X86::NoRegister)
-      .addReg(X86::RBX);
-  // NHM-TEST:
-  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64mi32))
-      .addReg(X86::RBX)
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(-8)
-      .addReg(X86::NoRegister)
-      .addImm(0x42);
-
-  // POST-CALL: Reload the private stack pointer after any indirect control-flow targets (ICTs).
-  SmallVector<MachineInstr *> ICTs;
-  SmallVector<MachineInstr *> Exits;
-  for (MachineBasicBlock &MBB : MF) {
-    for (MachineInstr &MI : MBB) {
-      // NHM-FIXME: ENDBRANCHes haven't been inserted at this point, so the second half of the if condition does nothing.
-      if ((MI.isCall() && !MI.isTerminator()) ||
-          ((MI.getOpcode() == X86::ENDBR32 || MI.getOpcode() == X86::ENDBR64) && &MBB != &MF.front())) {
-        ICTs.push_back(&MI);
-      }
-      // NHM-FIXME: Turn some of these into if-elses to speed up.
-      if (MI.isReturn())
-        Exits.push_back(&MI);
-      // NHM-NOTE: This works only because we insert the SjLj instrumentation later.
-      if (MI.getOpcode() == X86::EH_SjLj_Setup)
-        ICTs.push_back(&MI.getOperand(0).getMBB()->front());
-    }
-  }
-  for (MachineInstr *ICT : ICTs) {
-    MachineBasicBlock &MBB = *ICT->getParent();
-    const MachineBasicBlock::iterator MBBI = std::next(ICT->getIterator());
-    getPointerToFPSData(MBB, MBBI, Loc, ThdStackPtrsSym, X86::RBX);
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), X86::RBX)
-        .addReg(X86::RBX)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(0)
-        .addReg(X86::NoRegister);
-  }
-
-  // EPILOGUE: Add back frame size.
-  for (MachineInstr *Exit : Exits) {
-    MachineBasicBlock &MBB = *Exit->getParent();
-    const MachineBasicBlock::iterator MBBI = Exit->getIterator();
-    getPointerToFPSData(MBB, MBBI, Loc, ThdStackPtrsSym, X86::R15);
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::ADD64ri32), X86::RBX)
-        .addReg(X86::RBX)
-        .addImm(PrivateFrameSize);
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64mr))
-        .addReg(X86::R15)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(0)
-        .addReg(X86::NoRegister)
-        .addReg(X86::RBX);
-  }
-#endif
 
 
-  // ======== ALL THIS STUFF IS FOR REFERENCE ONLY ========= //
-  
-#if 0
-  MachineBasicBlock &EntryMBB = MF.front();
-  MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
-  MF.push_front(&AllocMBB);
-  MachineBasicBlock &OverflowMBB = *MF.CreateMachineBasicBlock();
-  MF.push_back(&OverflowMBB);
-
-  // NHM-FIXME: Detect 'norecurse' functions.
-  // Functions with 'norecurse' attribute: access directly via thread-local variable.
-  // Otherwise, the following:
-  // .fps.alloc:
-  //   
-  
-  // .fps.alloc:
-  //   MOV rbx, [__fps_stackptr]
-  //   SUB rbx, <frame-size>
-  //   JB rbx, .fps.stackoverflow
-  //  .fps.clamp:
-  //   CMOVB rbx, [__fps_stackptr]
-  //   ...
-  
-  // .fps.stackoverflow:
-  //   CALL abort
-  //   LFENCE
-
-  const auto AllocMBBI = AllocMBB.begin();
-  loadPrivateStackPointer(AllocMBB, AllocMBB.begin());
-
-  // NHM-FIXME: Use 8-bit vs. 32-bit depending on operand size.
-  if (needsFarTLS()) {
-    BuildMI(AllocMBB, AllocMBBI, Loc, TII->get(X86::COPY), X86::R15)
-        .addReg(X86::RBX);
-  }
-  BuildMI(AllocMBB, AllocMBBI, Loc, TII->get(X86::SUB64ri32), X86::RBX)
-      .addReg(X86::RBX)
-      .addImm(PrivateFrameSize);
-  TII->insertBranch(AllocMBB, &OverflowMBB, &EntryMBB, {MachineOperand::CreateImm(X86::COND_B)}, Loc);
-  AllocMBB.addSuccessor(&OverflowMBB);
-  AllocMBB.addSuccessor(&EntryMBB);
-  for (auto &LI : EntryMBB.liveins())
-    AllocMBB.addLiveIn(LI);
-
-  BuildMI(OverflowMBB, OverflowMBB.end(), Loc, TII->get(X86::TRAP)); // NHM-FIXME: Confirm this is what they do too.
-
-  auto EntryMBBI = EntryMBB.begin();
-  EntryMBB.addLiveIn(X86::EFLAGS);
-  EntryMBB.addLiveIn(X86::RBX);
-  if (needsFarTLS()) {
-    BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::CMOV64rr), X86::RBX)
-        .addReg(X86::RBX)
-        .addReg(X86::R15)
-        .addImm(X86::COND_B);
-    EntryMBB.addLiveIn(X86::R15);
-  } else {
-    BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::CMOV64rm), X86::RBX)
-                             .addReg(X86::RBX)
-                             .addReg(X86::NoRegister)
-                             .addImm(1)
-                             .addReg(X86::NoRegister)
-                             .addGlobalAddress(StackPtrSym, 0, X86II::MO_TPOFF)
-                             .addReg(X86::FS)
-                             .addImm(X86::COND_B);
-  }
-  loadPrivateStackBase(EntryMBB, EntryMBBI);
-  storePrivateStackPointer(EntryMBB, EntryMBBI);
-
-  SmallVector<MachineInstr *> Returns, Calls;
-  for (MachineBasicBlock &MBB : MF) {
-    for (MachineInstr &MI : MBB) {
-      if (MI.isReturn()) {
-        Returns.push_back(&MI);
-      } else if (MI.isCall()) {
-        Calls.push_back(&MI);
-      }
-    }
-  }
-
-  for (MachineInstr *Ret : Returns) {
-    MachineBasicBlock &EpilogMBB = *Ret->getParent();
-    MachineBasicBlock &RetMBB = *MF.CreateMachineBasicBlock();
-    MF.insert(std::next(EpilogMBB.getIterator()), &RetMBB);
-
-    LivePhysRegs LPR(*TRI);
-    LPR.addLiveIns(EpilogMBB);
-    for (auto MBBI = Ret->getParent()->begin(); MBBI != Ret->getIterator(); ++MBBI) {
-      SmallVector<std::pair<MCPhysReg, const MachineOperand *>> Clobbers;
-      LPR.stepForward(*MBBI, Clobbers);
-    }
-    RetMBB.splice(RetMBB.end(), &EpilogMBB, Ret->getIterator());
-    RetMBB.transferSuccessors(&EpilogMBB);
-    for (MCPhysReg LiveReg : LPR) {
-      RetMBB.addLiveIn(LiveReg);
-    }
-    storePrivateStackPointer(RetMBB, RetMBB.begin());
-    
-    // ADD rbx, <frame-size>
-    // CMP rbx, <stack-size>
-    // JAE rbx, .fps.stackoverflow
-    // NHM-FIXME: Fix debug loc.
-    BuildMI(EpilogMBB, EpilogMBB.end(), Loc, TII->get(X86::ADD64ri32), X86::RBX)
-        .addReg(X86::RBX)
-        .addImm(PrivateFrameSize);
-    // NHM-FIXME: Use ri8 vs. ri32 whereever appropriate.
-    BuildMI(EpilogMBB, EpilogMBB.end(), Loc, TII->get(X86::CMP64ri32))
-        .addReg(X86::RBX)
-        .addImm(PrivateStackSize);
-    TII->insertBranch(EpilogMBB, &OverflowMBB, &RetMBB, {MachineOperand::CreateImm(X86::COND_A)}, Loc);
-    EpilogMBB.addSuccessor(&RetMBB);
-    EpilogMBB.addSuccessor(&OverflowMBB);
-
-    // NHM-FIXME: Update live registers?
-
-    // NHM-FIXME: Add machine mem operands.
-  }
-
-  // Reload after calls.
-  for (MachineInstr *Call : Calls)
-    loadPrivateStackPointerAndBase(*Call->getParent(), std::next(Call->getIterator()));
-
-  // Reload after instructions that clobber it.
-  // NHM-FIXME: Don't double-reload after CALLs.
-  SmallVector<MachineInstr *> Clobbers;
-  for (MachineBasicBlock &MBB : MF)
-    for (MachineInstr &MI : MBB)
-      for (const MachineOperand &MO : MI.operands())
-        if (MO.isRegMask() && (MO.clobbersPhysReg(X86::RBX) || (needsFarTLS() && MO.clobbersPhysReg(X86::R15))))
-          Clobbers.push_back(&MI);
-  for (MachineInstr *Clobber : Clobbers)
-    if (Clobber->isTerminator())
-      for (MachineBasicBlock *Succ : Clobber->getParent()->successors())
-        loadPrivateStackPointerAndBase(*Succ, Succ->begin());
-    else
-      loadPrivateStackPointerAndBase(*Clobber->getParent(), std::next(Clobber->getIterator()));
-#endif
 
 #if 0
   // Reload at the target of EH_SjLj_Setup instructions.
