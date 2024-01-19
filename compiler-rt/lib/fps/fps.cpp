@@ -11,6 +11,7 @@ namespace fps {
 namespace {
 
 void thread_cleanup_handler(void *_iter);
+void garbage_collect_threads(void);
 
 /// Default size of function-private stacks.
 const unsigned kDefaultFPSSize = 0x100000;
@@ -136,6 +137,7 @@ __attribute__((constructor(0))) void init_main_thread() {
 
 // NHM-NOTE: This doesn't need a lock b/c all callers have locked stuff.
 size_t getUnusedIndex() {
+  garbage_collect_threads();
   size_t i;
   for (i = 0; i < getVecSize(); ++i)
     if (!__fps_thd_stackptrs[i])
@@ -194,11 +196,8 @@ void *thread_start(void *arg) {
   return thd_info->start_routine(thd_info->arg);
 }
 
-void thread_cleanup_handler(void *_iter) {
-  Lock threads_lock(threads_mutex);
-  pthread_setspecific(thread_cleanup_key, nullptr);
-
-  // Free stacks for dead threads.
+// NOTE: Must have locked.
+void garbage_collect_threads(void) {
   for (Thread **threadpp = &threads; *threadpp; ) {
     Thread *thread = *threadpp; 
     assert(thread->pid >= 0);
@@ -212,6 +211,12 @@ void thread_cleanup_handler(void *_iter) {
       threadpp = &thread->next;
     }
   }
+}
+
+void thread_cleanup_handler(void *_iter) {
+  Lock threads_lock(threads_mutex);
+  pthread_setspecific(thread_cleanup_key, nullptr);
+  garbage_collect_threads();
 }
 
 extern "C" __attribute__((weak, alias("__interceptor_pthread_create"), visibility("default"))) int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
