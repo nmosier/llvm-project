@@ -62,10 +62,9 @@ private:
 
   void partialRedundancyElimination(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, ArrayRef<MachineInstr *> Kills, SmallVectorImpl<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> &InsertPts);
 
-  void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses);
-  void emitPrologue(MachineFunction &MF, ArrayRef<MachineInstr *> Uses);
-
-  void makeRegsAvailable(MachineBasicBlock &MBB, MachineBasicBlock::iterator &MBBI, SmallVectorImpl<MCPhysReg> &FreeRegs, unsigned NumRegsRequired, bool SpillAfter);
+  void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, const DenseMap<int, uint64_t>& PrivateFrameInfo);
+  void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
+  void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);
 };
 
 static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
@@ -105,58 +104,82 @@ static MCPhysReg getSpillableReg(const LivePhysRegs &LPR, const TargetRegisterIn
   };
 
 
-void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
+void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) {
+  if (PrivateFrameSize == 0)
+    return;
+  
   MachineBasicBlock &MBB = MF.front();
+  auto MBBI = MBB.begin();
   const auto &MRI = MF.getRegInfo();
 
-  SmallVector<MachineInstr *> PrologueUses;
-  for (MachineInstr &MI : MBB) {
-    if (MI.isCall())
-      break;
-    if (is_contained(Uses, &MI))
-      PrologueUses.push_back(&MI);
-  }
-
-  MCPhysReg PSPAddrReg = X86::NoRegister;
-  MCPhysReg PSPValueReg = X86::NoRegister;
-
+  SmallVector<MCPhysReg, 2> Regs;
   LivePhysRegs LPR(*TRI);
   LPR.addLiveIns(MBB);
+  if (!getFreeRegs(LPR, MRI, 2, Regs))
+    report_fatal_error("Failed to get free registers for FPS prologue!");
+  assert(Regs.size() == 2);
+  assert(!LPR.contains(X86::EFLAGS));
 
-  if (PrologueUses.empty()) {
-    // Just pick any two free registers.
-    SmallVector<MCPhysReg, 2> FreeRegs;
-    if (!getFreeRegs(LPR, MRI, 2, FreeRegs))
-      report_fatal_error("Failed to find 2 free regs at function entrypoint!");
-    PSPAddrReg = FreeRegs[0];
-    PSPValueReg = FreeRegs[1];
-  } else {
-    // Let RegScavenger pick a value register.
-    RegScavenger RS;
-    RS.enterBasicBlockEnd(MBB);
-
-    for (MachineInstr *Use : reverse(PrologueUses)) {
-      if (Use == &MBB.front()) {
-        PSPValueReg = getFreeReg(LPR, MRI);
-        if (PSPValueReg == X86::NoRegister)
-          report_fatal_error("Failed to get free register!");
-        break;
-      }
-      
-      RS.backward(Use->getIterator());
-      PSPValueReg = RS.scavengeRegisterBackwards(X86::GR64RegClass, MBB.begin(), /*RestoreAfter*/true, /*AllowSpill*/true, /*EliminateFrameIndex*/false);
-      if (PSPValueReg != X86::NoRegister)
-        break;
-    }
-
-    if (PSPValueReg == X86::NoRegister)
-      report_fatal_error("Failed to scavenge register!");
-  }
-  
-  
+  getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStackPtrsSym, Regs[0]);
+  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
+      .addReg(Regs[0])
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::NoRegister);
+  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::SUB64ri32), Regs[1])
+      .addReg(Regs[1])
+      .addImm(PrivateFrameSize);
+  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mr))
+      .addReg(Regs[0])
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::NoRegister)
+      .addReg(Regs[1]);
 }
 
-void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
+void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {
+  if (PrivateFrameSize == 0)
+    return;
+
+  for (MachineBasicBlock &MBB : MF) {
+    if (MBB.empty() || !MBB.back().isReturn())
+      continue;
+
+    auto MBBI = MBB.back().getIterator();
+    const auto &MRI = MF.getRegInfo();
+
+    SmallVector<MCPhysReg, 2> Regs;
+    LivePhysRegs LPR(*TRI);
+    LPR.addLiveOuts(MBB);
+    LPR.stepBackward(MBB.back());
+    if (!getFreeRegs(LPR, MRI, 2, Regs))
+      report_fatal_error("Failed to get free registers for FPS epilogue!");
+    assert(Regs.size() == 2);
+    assert(!LPR.contains(X86::EFLAGS));
+
+    getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStackPtrsSym, Regs[0]);
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
+        .addReg(Regs[0])
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::ADD64ri32), Regs[1])
+        .addReg(Regs[1])
+        .addImm(PrivateFrameSize);
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mr))
+        .addReg(Regs[0])
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister)
+        .addReg(Regs[1]);
+  }
+}
+
+void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, const DenseMap<int, uint64_t> &PrivateFrameInfo) {
   const auto &MRI = MF.getRegInfo();
   auto &MFI = MF.getFrameInfo();
 
@@ -291,82 +314,28 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
       } else {
         loadPrivateStackPointer(MBB, FirstUseIt, PSPReg);
       }
-      // TODO: Fix case with live eflags.
-      
+
+      // Fixup uses with PSP reg.
+      for (auto MBBI = FirstUseIt; MBBI != PostScavengeIt; ++MBBI) {
+        if (isUse(&*MBBI)) {
+          const int MemRefIdx = X86::getFirstAddrOperandIdx(*MBBI);
+          assert(MemRefIdx >= 0);
+          MachineOperand &BaseMO = MBBI->getOperand(MemRefIdx + X86::AddrBaseReg);
+          MachineOperand &DispMO = MBBI->getOperand(MemRefIdx + X86::AddrDisp);
+          assert(BaseMO.isFI());
+          assert(DispMO.isImm());
+          int FI = BaseMO.getIndex();
+          BaseMO.ChangeToRegister(PSPReg, /*isDef*/false); // NHM-FIXME: Update isKill
+          assert(PrivateFrameInfo.contains(FI));
+          DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
+        }
+      }
 
       ++it1;
     }
     
   }
 }
-
-#if 0
-void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
-  assert(none_of(Uses, [] (const MachineInstr *MI) {
-    return MI->isCall() || MI->isTerminator();
-  }));
-
-  const auto &MRI = MF.getRegInfo();
-  
-  // Approach (not optimal!):
-  // We will just take a basic-block-wise approach for now.
-  // Break each basic block into slices [it1, it2], where it1 is the iterator following a KILL and it2 is the iterator before a USE.
-  // No intervening insturctions (it1, it2) are KILLs. Also, the range is maximal.
-
-  // PROLOGUE
-  MachineBasicBlock &EntryMBB = MF.front();
-  auto EntryMBBI = EntryMBB.begin();
-  LivePhysRegs EntryLPR(*TRI);
-  EntryLPR.addLiveIns(EntryMBB);
-
-  // Allocate a register for the private stack pointer itself.
-  auto findLastForwardUse = [&] (MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI) {
-    MachineBasicBlock::iterator UseMBBI = MBB.end();
-    for (auto it = MBBI; it != MBB.end(); ++it) {
-      MachineInstr &MI = *it;
-      if (is_contained(Uses, &MI))
-        UseMBBI = it;
-      if (MI.isCall())
-        break;
-    }
-    return UseMBBI;
-  };
-
-  auto getUsesInMBB = [&] (MachineBasicBlock &MBB, SmallVectorImpl<MachineInstr *>& Out) {
-    for (MachineInstr &MI : MBB)
-      if (is_contained(Uses, &MI))
-        Out.push_back(&MI);
-  };
-
-  SmallVector<MachineInstr *> EntryUses;
-  getUsesInMBB(EntryMBB, EntryUses);
-  MCPhysReg PSPAddrReg, PSPValueReg;
-  if (EntryUses.empty()) {
-    // Pick any two free registers.
-    SmallVector<MCPhysReg, 2> FreeRegs;
-    if (!getFreeRegs(EntryLPR, MRI, 2, FreeRegs))
-      report_fatal_error("Failed to find 2 free regs at function entrypoint!");
-  } else {
-    // Let RegScavenger pick a register first. Then we'll pick another free register.
-    RegScavenger RS;
-    RS.enterBasicBlockEnd(EntryMBB);
-    RS.backward(EntryUseMBBI);
-    if (EntryMBBI == EntryUseMBBI) {
-      PSPValueReg = getFreeReg(EntryLPR, MRI);
-      if (PSPValueReg == X86::NoRegister)
-        report_fatal_error("Failed to get scratch value register for prologue!");
-    } else {
-      PSPValueReg = RS.scavengeRegisterBackwards(X86::GR64RegClass, EntryMBBI, /*RestoreAfter*/true, /*AllowSpill*/true, /*EliminateFrameIndex*/false);
-      if (PSPValueReg == X86::NoRegister)
-        report_fatal_error("Failed to scavenge value register for prologue!");
-    }
-    PSPAddrReg = getFreeReg(EntryLPR, MRI, {PSPValueReg});
-    if (PSPAddrReg == X86::NoRegister)
-      report_fatal_error("Failed to get scratch pointer register for prologue!");
-  }
- 
-}
-#endif
 
 void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc) {
   getPointerToFPSData(MBB, MBBI, Loc, ThdStackPtrsSym, Reg);
@@ -377,479 +346,6 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, M
       .addImm(0)
       .addReg(X86::NoRegister);
 }
-
-void X86FunctionPrivateStacks::makeRegsAvailable(MachineBasicBlock &MBB, MachineBasicBlock::iterator &MBBI, SmallVectorImpl<MCPhysReg> &FreeRegs, unsigned NumRegsRequired, bool SpillAfter) {
-  MachineFunction &MF = *MBB.getParent();
-  const MachineRegisterInfo &MRI = MF.getRegInfo();
-  MachineFrameInfo &MFI = MF.getFrameInfo();
-
-  // Get live-ins to MI. We use this to try to find free registers.
-  LivePhysRegs LPR(*TRI);
-  LPR.addLiveOuts(MBB);
-  for (MachineInstr &LiveMI : reverse(MBB)) {
-    LPR.stepBackward(LiveMI);
-    if (LiveMI.getIterator() == MBBI)
-      break;
-  }
-
-  // Try to get as many free regs as possible.
-  for (MCPhysReg Reg : X86::GR64RegClass) {
-    assert(FreeRegs.size() < NumRegsRequired);
-    if (LPR.available(MRI, Reg))
-      FreeRegs.push_back(Reg);
-    if (FreeRegs.size() == NumRegsRequired)
-      return;
-  }
-
-  assert(FreeRegs.size() < NumRegsRequired);
-  assert(!MBB.empty());
-
-  // Remove uses from live-ins to MI to get spill candidate set.
-  MachineInstr &MI = *MBBI;
-  for (const MachineOperand &MO : MI.operands())  // NHM-FIXME: uses()?
-    if (MO.isReg() && MO.isUse() && MO.getReg() != X86::NoRegister)
-      LPR.removeReg(MO.getReg());
-
-  // Try to spill registers around MI.
-
-  auto getSpillableReg = [&] (const LivePhysRegs &LPR) -> MCPhysReg {
-    auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
-      if (LPR.contains(Reg))
-        return true;
-      if (MRI.isReserved(Reg))
-        return false;
-      for (MCRegAliasIterator R(Reg, TRI, false); R.isValid(); ++R)
-        if (LPR.contains(*R))
-          return true;
-      return false;
-    });
-    if (it == std::end(X86::GR64RegClass))
-      return X86::NoRegister;
-    else
-      return *it;
-  };
-
-  // NHM-FIXME: Should return full reg.n
-  auto getSpillRegs = [&] (const LivePhysRegs &LPR, SmallVectorImpl<MCPhysReg> &SpillRegs) -> MCPhysReg {
-    Register SpillRegFull = getSpillableReg(LPR);
-    if (SpillRegFull == X86::NoRegister) {
-    } else if (LPR.contains(SpillRegFull)) {
-      SpillRegs.push_back(SpillRegFull);
-    } else if (Register SpillReg32 = getX86SubSuperRegister(SpillRegFull, 32); LPR.contains(SpillReg32)) {
-      SpillRegs.push_back(SpillReg32);
-    } else if (Register SpillReg16 = getX86SubSuperRegister(SpillRegFull, 16); LPR.contains(SpillReg16)) {
-      SpillRegs.push_back(SpillReg16);
-    } else {
-      Register SpillReg8H = getX86SubSuperRegister(SpillRegFull, 8, /*High*/true);
-      if (LPR.contains(SpillReg8H))
-        SpillRegs.push_back(SpillReg8H);
-      Register SpillReg8L = getX86SubSuperRegister(SpillRegFull, 8, /*High*/false);
-      if (LPR.contains(SpillReg8L))
-        SpillRegs.push_back(SpillReg8L);
-    }
-    return SpillRegFull;
-  };
-  
-
-  while (FreeRegs.size() < NumRegsRequired) {
-    SmallVector<MCPhysReg, 2> SpillRegs;
-    MCPhysReg FreeReg = getSpillRegs(LPR, SpillRegs);
-    if (FreeReg == X86::NoRegister)
-      report_fatal_error("Cannot spill any registers at this point!");
-
-    for (MCPhysReg SpillReg : SpillRegs) {
-      const auto *RC = TRI->getMinimalPhysRegClass(SpillReg);
-      unsigned SpillSize = TRI->getSpillSize(*RC);
-      int FI = MFI.CreateSpillStackObject(SpillSize, Align(SpillSize));
-      TII->storeRegToStackSlot(MBB, MBBI, SpillReg, true, FI, RC, TRI, X86::NoRegister);
-      TII->loadRegFromStackSlot(MBB, SpillAfter ? std::next(MBBI) : MBBI, SpillReg, FI, RC, TRI, X86::NoRegister);
-      LPR.removeReg(SpillReg);
-      if (!SpillAfter)
-        --MBBI;
-    }
-
-    assert(LPR.available(MRI, FreeReg));
-
-    FreeRegs.push_back(FreeReg);
-  }
-}
-
-void X86FunctionPrivateStacks::partialRedundancyElimination(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, ArrayRef<MachineInstr *> Kills, SmallVectorImpl<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> &InsertPts) {
-  struct InOut {
-    bool In;
-    bool Out;
-
-    bool operator==(const InOut &Other) const {
-      return In == Other.In && Out == Other.Out;
-    }
-  };
-
-  // ANTICIPATED EXPRESSIONS
-  std::map<MachineBasicBlock *, InOut> AnticipatedMBBs;
-  std::map<MachineInstr *, InOut> AnticipatedMIs;
-
-  // Iniitalize
-  for (MachineBasicBlock &MBB : MF) {
-    auto& AnticipatedMBB = AnticipatedMBBs[&MBB];
-    AnticipatedMBB.In = true;
-    AnticipatedMBB.Out = !MBB.succ_empty();
-    for (MachineInstr &MI : MBB) {
-      auto &AnticipatedMI = AnticipatedMIs[&MI];
-      AnticipatedMI.In = true;
-      AnticipatedMI.Out = true;
-    }
-  }
-
-  // Run data-flow
-  while (true) {
-    const auto BakMBBs = AnticipatedMBBs;
-    const auto BakMIs = AnticipatedMIs;
-
-    for (MachineBasicBlock &MBB : MF) {
-      auto &AnticipatedMBB = AnticipatedMBBs[&MBB];
-
-      // Meet OUT[MBB].
-      for (MachineBasicBlock *Succ : MBB.successors())
-        AnticipatedMBB.Out &= AnticipatedMBBs[Succ].In;
-
-      // Transfer instructions.
-      for (MachineInstr &MI : reverse(MBB)) {
-        auto &AnticipatedMI = AnticipatedMIs[&MI];
-
-        // Compute OUT.
-        if (MachineInstr *Succ = MI.getNextNode())
-          AnticipatedMI.Out = AnticipatedMIs[Succ].In;
-        else
-          AnticipatedMI.Out = AnticipatedMBB.Out;
-
-        // Transfer IN.
-        AnticipatedMI.In = AnticipatedMI.Out;
-        if (is_contained(Kills, &MI))
-          AnticipatedMI.In = false;
-        if (is_contained(Uses, &MI))
-          AnticipatedMI.In = true;
-      }
-
-      // Compute IN[MBB].
-      if (MBB.empty())
-        AnticipatedMBB.In = AnticipatedMBB.Out;
-      else
-        AnticipatedMBB.In = AnticipatedMIs[&MBB.front()].In;
-      
-    }
-
-    if (BakMBBs == AnticipatedMBBs && BakMIs == AnticipatedMIs)
-      break;
-  }
-
-
-  // AVAILBLE EXPRESSIONS
-  std::map<MachineBasicBlock *, InOut> AvailableMBBs;
-  std::map<MachineInstr *, InOut> AvailableMIs;
-
-  // Initialization.
-  for (MachineBasicBlock &MBB : MF) {
-    auto &AvailableMBB = AvailableMBBs[&MBB];
-    AvailableMBB.In = !MBB.pred_empty();
-    AvailableMBB.Out = true;
-    for (MachineInstr &MI : MBB) {
-      auto &AvailableMI = AvailableMIs[&MI];
-      AvailableMI.In = true;
-      AvailableMI.Out = true;
-    }
-  }
-
-  // Run data-flow
-  while (true) {
-    const auto BakMBBs = AvailableMBBs;
-    const auto BakMIs = AvailableMIs;
-
-    for (MachineBasicBlock &MBB : MF) {
-      auto &AvailableMBB = AvailableMBBs[&MBB];
-
-      // Meet IN[MBB].
-      for (MachineBasicBlock *Pred : MBB.predecessors())
-        AvailableMBB.In &= AvailableMBBs[Pred].Out;
-
-      // Transfer instructions.
-      for (MachineInstr &MI : MBB) {
-        auto &AvailableMI = AvailableMIs[&MI];
-        
-        // Compute IN[MI]
-        if (MachineInstr *Pred = MI.getPrevNode())
-          AvailableMI.In = AvailableMIs[Pred].Out;
-        else
-          AvailableMI.In = AvailableMBB.In;
-
-        // Transfer OUT[MI]
-        AvailableMI.Out = (AvailableMI.In || AnticipatedMIs[&MI].In) && !is_contained(Kills, &MI);
-      }
-
-      // Compute OUT[MBB]
-      if (MBB.empty())
-        AvailableMBB.Out = AvailableMBB.In;
-      else
-        AvailableMBB.Out = AvailableMIs[&MBB.back()].Out;
-    }
-
-    if (BakMBBs == AvailableMBBs && BakMIs == AvailableMIs)
-      break;
-  }
-  
-  // Find the final insertion points.
-  for (MachineBasicBlock &MBB : MF) {
-    if (MBB.empty()) {
-      if (AnticipatedMBBs[&MBB].In && !AvailableMBBs[&MBB].In)
-        InsertPts.emplace_back(&MBB, MBB.begin());
-    } else {
-      for (MachineInstr &MI : MBB) {
-        if (AnticipatedMIs[&MI].In && !AvailableMIs[&MI].In)
-          InsertPts.emplace_back(&MBB, MI.getIterator());
-      }
-    }
-  }
-  
-}
-
-#if 0
-void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
- 
-  const MachineRegisterInfo &MRI = MF.getRegInfo();
-  MachineFrameInfo &MFI = MF.getFrameInfo();
-
-  auto getFreeReg = [&] (const LivePhysRegs &LPR) -> Register {
-    auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
-      return LPR.available(MRI, Reg);
-    });
-    if (it == std::end(X86::GR64RegClass))
-      return X86::NoRegister;
-    else
-      return *it;
-  };
-
-  auto hasFreeReg = [&] (const LivePhysRegs &LPR) -> bool {
-    return getFreeReg(LPR) != X86::NoRegister;
-  };
-
-  auto getSpillableReg = [&] (const LivePhysRegs &LPR) -> Register {
-    auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
-      if (LPR.contains(Reg))
-        return true;
-      if (MRI.isReserved(Reg))
-        return false;
-      for (MCRegAliasIterator R(Reg, TRI, false); R.isValid(); ++R)
-        if (LPR.contains(*R))
-          return true;
-      return false;
-    });
-    if (it == std::end(X86::GR64RegClass))
-      return X86::NoRegister;
-    else
-      return *it;
-  };
-
-  // NHM-FIXME: Should return full reg.n
-  auto getSpillRegs = [&] (const LivePhysRegs &LPR, SmallVectorImpl<Register> &SpillRegs) {
-    Register SpillRegFull = getSpillableReg(LPR);
-    assert(SpillRegFull != X86::NoRegister);
-    if (LPR.contains(SpillRegFull)) {
-      SpillRegs.push_back(SpillRegFull);
-      return;
-    }
-    Register SpillReg32 = getX86SubSuperRegister(SpillRegFull, 32);
-    if (LPR.contains(SpillReg32)) {
-      SpillRegs.push_back(SpillReg32);
-      return;
-    }
-    Register SpillReg16 = getX86SubSuperRegister(SpillRegFull, 16);
-    if (LPR.contains(SpillReg16)) {
-      SpillRegs.push_back(SpillReg16);
-      return;
-    }
-    Register SpillReg8H = getX86SubSuperRegister(SpillRegFull, 8, /*High*/true);
-    if (LPR.contains(SpillReg8H))
-      SpillRegs.push_back(SpillReg8H);
-    Register SpillReg8L = getX86SubSuperRegister(SpillRegFull, 8, /*High*/false);
-    if (LPR.contains(SpillReg8L))
-      SpillRegs.push_back(SpillReg8L);
-  };
-
-  auto checkUses = [&] () {
-    for (MachineInstr *Use : Uses) {
-      MachineBasicBlock &MBB = *Use->getParent();
-      LivePhysRegs LPR(*TRI);
-      LPR.addLiveOuts(MBB);
-      for (MachineInstr &MI : reverse(MBB)) {
-        LPR.stepBackward(MI);
-        if (&MI == Use)
-          break;
-      }
-      if (!hasFreeReg(LPR)) {
-        LLVM_DEBUG(dbgs() << "use does not have free reg: " << *Use);
-      }
-      assert(hasFreeReg(LPR));
-    }
-  };
-  
-
-  
-  // Construct kils.
-  SmallVector<MachineInstr *> Kills;
-  SmallVector<MachineInstr *> Tmps;
-  SmallSet<MachineBasicBlock *, 8> KilledOnEntry;
-  SmallSet<MachineBasicBlock *, 8> KilledOnExit;
-  for (MachineBasicBlock &MBB : MF) {
-    LivePhysRegs LPR(*TRI);
-    LPR.addLiveOuts(MBB);
-
-    auto hasFreeReg = [&] (const LivePhysRegs &LPR) -> bool {
-      return any_of(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
-        return LPR.available(MRI, Reg);
-      });
-    };
-
-    if (!hasFreeReg(LPR))
-      KilledOnExit.insert(&MBB);
-
-    for (MachineInstr &MI : reverse(MBB)) {
-      // If no registers are free, then treat it as kill.
-      LPR.addUses(MI);
-      if (!hasFreeReg(LPR))
-        Kills.push_back(&MI);
-
-      // Calls are always kills.
-      if (MI.isCall())
-        Kills.push_back(&MI);
-
-      LPR.stepBackward(MI);
-    }
-
-    if (MBB.hasAddressTaken())
-      KilledOnEntry.insert(&MBB);
-
-    // Check live ins.
-    LPR.clear();
-    LPR.addLiveIns(MBB);
-    for (MachineBasicBlock *Pred : MBB.predecessors())
-      LPR.addLiveOuts(*Pred);
-    if (!hasFreeReg(LPR))
-      KilledOnEntry.insert(&MBB);
-  }
-  if (const MachineJumpTableInfo *JTI = MF.getJumpTableInfo())
-    for (const MachineJumpTableEntry &JTE : JTI->getJumpTables())
-      for (MachineBasicBlock *MBB : JTE.MBBs)
-        KilledOnEntry.insert(MBB);
-  for (MachineBasicBlock *MBB : KilledOnEntry) {
-    MachineInstr *Tmp = BuildMI(*MBB, MBB->begin(), DebugLoc(), TII->get(X86::NOOP));
-    Tmps.push_back(Tmp);
-    Kills.push_back(Tmp);
-  }
-  for (MachineBasicBlock *MBB : KilledOnExit) {
-    MachineInstr *Tmp = BuildMI(*MBB, MBB->end(), DebugLoc(), TII->get(X86::NOOP));
-    Tmps.push_back(Tmp);
-    Kills.push_back(Tmp);
-  }
-
-  SmallVector<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> InsertPts;
-  partialRedundancyElimination(MF, Uses, Kills, InsertPts);
-
-
-
-  // Insert loads of PSP.
-  // Spill registers as needed.
-  // NHM-FIXME: Should use an iterative algorithm to reduce spills and maximize spilled intervals.
-  // NHM-FIXME: Need to be able step forward too! Assert it's identical in both directions.
-  for (auto [MBB, MBBI] : InsertPts) {
-    LivePhysRegs LPR(*TRI);
-    LPR.addLiveOuts(*MBB);
-    for (MachineInstr &MI : reverse(*MBB)) {
-      LPR.stepBackward(MI);
-      if (MI.getIterator() == MBBI)
-        break;
-    }
-    
-    // Check how many registers we need
-    //  if EFLAGS not live -> 1
-    //  if EFLAGS live -> 2
-    bool LiveEFLAGS = LPR.contains(X86::EFLAGS);
-    int NumRegsRequired = LiveEFLAGS ? 2 : 1;
-
-    // Get free regs for our use.
-    SmallVector<MCPhysReg, 2> FreeRegs;
-    makeRegsAvailable(*MBB, MBBI, FreeRegs, NumRegsRequired, /*SpillAfter*/false);
-    assert(FreeRegs.size() == NumRegsRequired);
-    assert(!LiveEFLAGS || FreeRegs.front() != FreeRegs.back());
-
-    // Load private stack pointer using them.
-    DebugLoc Loc;
-    BuildMI(*MBB, MBBI, Loc, TII->get(X86::MOV64rm), FreeRegs.back())
-        .addReg(X86::RIP)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addGlobalAddress(StackIdxSym)
-        .addReg(X86::NoRegister);
-    if (LiveEFLAGS) {
-      BuildMI(*MBB, MBBI, Loc, TII->get(X86::MOV64rm), FreeRegs.front())
-          .addReg(X86::NoRegister)
-          .addImm(1)
-          .addReg(X86::NoRegister)
-          .addGlobalAddress(ThdStackPtrsSym, 0, X86II::MO_DTPOFF)
-          .addReg(X86::FS);
-      BuildMI(*MBB, MBBI, Loc, TII->get(X86::MOV64rm), FreeRegs.front())
-          .addReg(FreeRegs.front())
-          .addImm(1)
-          .addReg(FreeRegs.back())
-          .addImm(0)
-          .addReg(X86::NoRegister);
-    } else {
-      BuildMI(*MBB, MBBI, Loc, TII->get(X86::ADD64rm), FreeRegs.front())
-          .addReg(FreeRegs.front())
-          .addReg(X86::NoRegister)
-          .addImm(1)
-          .addReg(X86::NoRegister)
-          .addGlobalAddress(ThdStackPtrsSym, 0, X86II::MO_DTPOFF)
-          .addReg(X86::FS);
-      BuildMI(*MBB, MBBI, Loc, TII->get(X86::MOV64rm), FreeRegs.front())
-          .addReg(FreeRegs.front())
-          .addImm(1)
-          .addReg(X86::NoRegister)
-          .addImm(0)
-          .addReg(X86::NoRegister);
-    }
-
-    LLVM_DEBUG(dbgs() << "New basic block: " << *MBB);
-    
-#if 0
-    LPR.addLiveIns(*MBB);
-    for (auto LiveMBBI = MBB->begin(); LiveMBBI != MBBI; ++LiveMBBI) {
-      SmallVector<std::pair<MCPhysReg, const MachineOperand *>> Clobbers;
-      LPR.stepForward(*LiveMBBI, Clobbers);
-    }
-#else
-    // NHM-FIXME: Should be able to step forward too!
-    LPR.addLiveOuts(*MBB);
-    for (MachineInstr &MI : reverse(*MBB)) {
-      LPR.stepBackward(MI);
-      if (MI.getIterator() == MBBI)
-        break;
-    }
-#endif
-
-#if 0
-    auto RegIt = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
-      return LPR.available(MRI, Reg);
-    });
-    assert(RegIt != std::end(X86::GR64RegClass));
-    loadPrivateStackPointer(*MBB, MBBI, *RegIt);
-#endif
-  }  
-
-  // Erase temporary instructions.
-  // NOTE: This should go last.
-  for (MachineInstr *Tmp : Tmps)
-    Tmp->eraseFromParent();
-}
-#endif
 
 
 bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
@@ -992,14 +488,10 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   TII = STI.getInstrInfo();
   TRI = STI.getRegisterInfo();
   MFI = &MF.getFrameInfo();
-  auto &MRI = MF.getRegInfo();
 
   // NHM-FIXME: Make it an assert?
   if (TRI->hasBasePointer(MF))
     report_fatal_error("No function should have base pointer with FPS enabled!");
-#if 0
-  assert(MRI.reg_empty(X86::RBX) && "Expected no existing uses of RBX for functions requiring a private stack!");
-#endif
   assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
 
   StackIdxSym = M.getNamedValue(("__fps_stackidx_" + MF.getName()).str());
@@ -1034,17 +526,6 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     // Move uses to safe stack.
     for (MachineOperand *UseOp : Uses) {
       MachineInstr *MI = UseOp->getParent();
-      const unsigned MemRefIdxBegin = UseOp->getOperandNo() - X86::AddrBaseReg;
-      MachineOperand &BaseOp = MI->getOperand(MemRefIdxBegin + X86::AddrBaseReg);
-      MachineOperand &ScaleOp = MI->getOperand(MemRefIdxBegin + X86::AddrScaleAmt);
-      MachineOperand &IndexOp = MI->getOperand(MemRefIdxBegin + X86::AddrIndexReg);
-      MachineOperand &DispOp = MI->getOperand(MemRefIdxBegin + X86::AddrDisp);
-      MachineOperand &SegmentOp = MI->getOperand(MemRefIdxBegin + X86::AddrSegmentReg);
-
-#if 0
-      BaseOp.ChangeToRegister(X86::RBX, /*isDef*/false);
-      DispOp.setImm(DispOp.getImm() + PrivateFrameOffset);
-#endif
       PrivateFrameAccesses.push_back(MI);
     }
   }
@@ -1052,8 +533,17 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
 
   // Collect restore points for stack pointer.
-  assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses);
-  // emitPrologue(MF, PrivateFrameAccesses);
+  assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses, PrivateFrameInfo);
+  emitPrologue(MF, PrivateFrameSize);
+  emitEpilogue(MF, PrivateFrameSize);
+
+  for (MachineInstr *MI : PrivateFrameAccesses) {
+    const int MemRefIdx = X86::getFirstAddrOperandIdx(*MI);
+    assert(MemRefIdx >= 0);
+    const MachineOperand &BaseMO = MI->getOperand(MemRefIdx + X86::AddrBaseReg);
+    assert(BaseMO.isReg());
+  }
+    
 
 #if 0
   // PROLOGUE: Private stack frame setup on function entry.
