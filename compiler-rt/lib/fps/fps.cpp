@@ -39,8 +39,7 @@ struct FunctionPrivateStack {
 
   void allocate(size_t size, size_t guard) {
     this->size = size;
-    base = safestack::Mmap(nullptr, size + guard, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    FPS_CHECK(base != MAP_FAILED);
+    base = Mmap(nullptr, size + guard, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
     safestack::Mprotect(base, guard, PROT_NONE);
     // NHM-FIXME: Guard on other side?
     ptr = static_cast<uint8_t *>(base) + size - guard;
@@ -89,22 +88,22 @@ private:
   T *CreateNewMap() {
     static_assert(sizeof(T) == sizeof(void *), "");
     FPS_CHECK(map_length % sizeof(T) == 0);
-    T *map = static_cast<T *>(safestack::Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
-    FPS_CHECK(map != MAP_FAILED);
-    return map;
+    return (T *) Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
   }
 
   template <typename T>
   static void growOne(T *&map) {
     void *old_map = map;
     void *new_map = Mremap(old_map, map_length, map_length * 2);
-    if (new_map == MAP_FAILED && errno == ENOMEM) {
-      new_map = safestack::Mmap(old_map, map_length * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-      FPS_CHECK(map != MAP_FAILED);
+    if (new_map == MAP_FAILED) {
+      if (errno != ENOMEM) {
+        fprintf(stderr, "[fps] mremap failed: %s\n", strerror(errno));
+      }
+      new_map = Mmap(old_map, map_length * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
       memcpy(new_map, old_map, map_length);
       // NHM-FIXME: Figure out a way to do this.
       // Munmap(map, map_length, map_length * 2);
-      safestack::Mprotect(old_map, map_length, PROT_READ);
+      Mprotect(old_map, map_length, PROT_READ);
     }
     map = (T *) new_map;
   }
@@ -126,8 +125,7 @@ public:
   void allocateStack(size_t index, size_t stacksize, size_t guardsize) {
     FPS_CHECK(index < getVecSize());
     // NHM-FIXME: Do guard.
-    void *stackbase = safestack::Mmap(nullptr, stacksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    FPS_CHECK(stackbase != MAP_FAILED);
+    void *stackbase = Mmap(nullptr, stacksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
     stacksizes[index] = stacksize;
     stackbases[index] = stackbase;
     stackptrs[index] = static_cast<char *>(stackbase) + stacksize;
@@ -208,12 +206,12 @@ struct tinfo {
 };
 
 void *thread_start(void *arg) {
-  Lock threads_lock(threads_mutex);
   tinfo *thd_info = (tinfo *) arg;
-  __fps_thd_stackptrs = threads->stackptrs;
-  __fps_thd_stackbases = threads->stackbases;
-  __fps_thd_stacksizes = threads->stacksizes;
-  threads_lock.unlock();
+  Thread *thread = thd_info->thread;
+  __fps_thd_stackptrs = thread->stackptrs;
+  __fps_thd_stackbases = thread->stackbases;
+  __fps_thd_stacksizes = thread->stacksizes;
+  FPS_CHECK(__fps_thd_stackptrs && __fps_thd_stackbases && __fps_thd_stacksizes);
   return thd_info->start_routine(thd_info->arg);
 }
 

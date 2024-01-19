@@ -42,13 +42,26 @@ T align_up(T n, T align) {
 }
 
 inline void *Mremap(void *old_address, size_t old_size, size_t new_size, int flags = 0, void *new_address = nullptr) {
+  void *map;
 #if SANITIZER_NETBSD
-  return __mremap(old_address, old_size, new_size, flags, new_address);
+  map = __mremap(old_address, old_size, new_size, flags, new_address);
 #elif SANITIZER_FREEBSD && (defined(__aarch64__) || defined(__x86_64__))
-  return (void *) __syscall(SYS_mremap, old_address, old_size, new_size, flags, new_address);
+  map = (void *) __syscall(SYS_mremap, old_address, old_size, new_size, flags, new_address);
 #else
-  return (void *) syscall(SYS_mremap, old_address, old_size, new_size, flags, new_address);
+  map = (void *) syscall(SYS_mremap, old_address, old_size, new_size, flags, new_address);
 #endif
+  return map;
+}
+
+inline void *Mmap(void *addr, size_t length, int prot, int flags, int fd = -1, off_t offset = 0) {
+  void *map = safestack::Mmap(addr, length, prot, flags, fd, offset);
+  FPS_CHECK(map != MAP_FAILED);
+  return map;
+}
+
+inline void Mprotect(void *addr, size_t length, int prot) {
+  int rv = safestack::Mprotect(addr, length, prot);
+  FPS_CHECK(rv == 0);
 }
 
 template <typename T>
