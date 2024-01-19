@@ -17,52 +17,6 @@ const unsigned kDefaultFPSSize = 0x100000;
 const unsigned kGuardSize = getpagesize();
 const unsigned kStackAlign = 16;
 
-struct FunctionPrivateStack {
-  uintptr_t size;
-  void *base;
-  void *ptr;
-
-  FunctionPrivateStack(): size(0) {}
-
-  FunctionPrivateStack &operator=(FunctionPrivateStack &&other) {
-    if (valid())
-      deallocate();
-    size = other.size;
-    base = other.base;
-    ptr = other.ptr;
-    other.size = 0;
-    return *this;
-  }
-
-  ~FunctionPrivateStack() {
-    if (valid())
-      deallocate();
-  }
-
-  void allocate(size_t size, size_t guard) {
-    this->size = size;
-    base = Mmap(nullptr, size + guard, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
-    safestack::Mprotect(base, guard, PROT_NONE);
-    // NHM-FIXME: Guard on other side?
-    ptr = static_cast<uint8_t *>(base) + size - guard;
-
-    fprintf(stderr, "allocated FPS @ %p with size %zu\n", base, size);
-  }
-
-  void deallocate() {
-    safestack::Munmap(base, size);
-    size = 0;
-  }
-
-  bool valid() const {
-    return size > 0;
-  }
-
-  operator bool() const {
-    return valid();
-  }
-};
-
 size_t map_length = 0;
 
 size_t getVecSize() {
