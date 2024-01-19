@@ -10,6 +10,8 @@
 namespace fps {
 namespace {
 
+void thread_cleanup_handler(void *_iter);
+
 /// Default size of function-private stacks.
 const unsigned kDefaultFPSSize = 0x100000;
 const unsigned kGuardSize = getpagesize();
@@ -74,6 +76,8 @@ const char **names = nullptr;
 
 class Thread {
 public:
+  pid_t pid = -1;
+  pid_t tid = -1;
   void **stackptrs;
   void **stackbases;
   uintptr_t *stacksizes;
@@ -108,12 +112,26 @@ private:
     map = (T *) new_map;
   }
 
+  void Unmap(void *map, size_t length) {
+    safestack::Munmap(map, length);
+  }
+  
 public:
 
   Thread(Thread *next): next(next) {
     stackptrs = CreateNewMap<void *>();
     stackbases = CreateNewMap<void *>();
     stacksizes = CreateNewMap<uintptr_t>();
+    pid = getpid();
+  }
+
+  ~Thread() {
+    for (size_t i = 0; i < getVecSize(); ++i)
+      if (stacksizes[i] > 0)
+        Unmap(stackbases[i], stacksizes[i]);
+    Unmap(stackptrs, map_length);
+    Unmap(stackbases, map_length);
+    Unmap(stacksizes, map_length);
   }
 
   void grow() {
@@ -144,6 +162,8 @@ public:
 
 Thread *threads = nullptr;
 pthread_mutex_t threads_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_key_t thread_cleanup_key;
+thread_local Thread *__fps_thread = nullptr;
 
 __attribute__((constructor(0))) void init_main_thread() {
   Lock threads_lock(threads_mutex);
@@ -151,11 +171,13 @@ __attribute__((constructor(0))) void init_main_thread() {
     return;
   
   map_length = getpagesize(); // NHM-FIXME: Maybe hard-code it instead?
-  threads = new (malloc(sizeof(Thread))) Thread(threads);
+  __fps_thread = threads = new (malloc(sizeof(Thread))) Thread(threads);
   __fps_thd_stackptrs = threads->stackptrs;
   __fps_thd_stackbases = threads->stackbases;
   __fps_thd_stacksizes = threads->stacksizes;
   names = (const char **) malloc(getpagesize());
+
+  pthread_key_create(&thread_cleanup_key, thread_cleanup_handler);
 }
 
 // NHM-NOTE: This doesn't need a lock b/c all callers have locked stuff.
@@ -208,11 +230,34 @@ struct tinfo {
 void *thread_start(void *arg) {
   tinfo *thd_info = (tinfo *) arg;
   Thread *thread = thd_info->thread;
+  __fps_thread = thread;
+  __fps_thread->tid = safestack::GetTid();
   __fps_thd_stackptrs = thread->stackptrs;
   __fps_thd_stackbases = thread->stackbases;
   __fps_thd_stacksizes = thread->stacksizes;
   FPS_CHECK(__fps_thd_stackptrs && __fps_thd_stackbases && __fps_thd_stacksizes);
+  pthread_setspecific(thread_cleanup_key, (void *) 1);
   return thd_info->start_routine(thd_info->arg);
+}
+
+void thread_cleanup_handler(void *_iter) {
+  Lock threads_lock(threads_mutex);
+  pthread_setspecific(thread_cleanup_key, nullptr);
+
+  // Free stacks for dead threads.
+  for (Thread **threadpp = &threads; *threadpp; ) {
+    Thread *thread = *threadpp; 
+    assert(thread->pid >= 0);
+    assert(__fps_thread->pid >= 0);
+    if (thread->pid != __fps_thread->pid || thread->tid >= 0 && thread->tid != __fps_thread->tid && safestack::TgKill(thread->pid, thread->tid, 0) < 0 && errno == ESRCH) {
+      // NHM-FIXME: Unmap stacks.
+      thread->~Thread();
+      *threadpp = thread->next;
+      free(thread);
+    } else {
+      threadpp = &thread->next;
+    }
+  }
 }
 
 extern "C" __attribute__((weak, alias("__interceptor_pthread_create"), visibility("default"))) int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);

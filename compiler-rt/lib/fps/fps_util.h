@@ -55,7 +55,10 @@ inline void *Mremap(void *old_address, size_t old_size, size_t new_size, int fla
 
 inline void *Mmap(void *addr, size_t length, int prot, int flags, int fd = -1, off_t offset = 0) {
   void *map = safestack::Mmap(addr, length, prot, flags, fd, offset);
-  FPS_CHECK(map != MAP_FAILED);
+  if (map == MAP_FAILED) {
+    perror("[fps] mmap failed");
+    abort();
+  }
   return map;
 }
 
