@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <errno.h>
 #include <string.h>
+#include <sys/resource.h>
 #include "safestack/safestack_util.h"
 #include "safestack/safestack_platform.h"
 #include "fps/fps_util.h"
@@ -19,8 +20,6 @@ void garbage_collect_threads(void);
 
 /// Default size of function-private stacks.
 const unsigned kDefaultFPSSize = 0x100000;
-const unsigned kGuardSize = getpagesize();
-const unsigned kStackAlign = 16;
 
 // NHM-FIXME: MAke a static variable of Livethread?
 size_t map_length = 0;
@@ -32,7 +31,6 @@ size_t getVecSize() {
 extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackptrs = nullptr;
 extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackbases = nullptr;
 extern "C" __attribute__((visibility("default"))) thread_local uint64_t *__fps_thd_stacksizes = nullptr;
-const char **names = nullptr;
 // TODO: add global, realloc'ed array of bools to determine if index is active.
 
 
@@ -45,12 +43,17 @@ public:
   void **&stackptrs;
   void **&stackbases;
   uintptr_t *&stacksizes;
+  const size_t default_stack_size;
+  const size_t default_guard_size;
+  // NHM-FIXME: Add a new array, name it "stackend" or "stacktop"
   LiveThread *next = nullptr;
 
-  LiveThread():
+  LiveThread(size_t default_stack_size, size_t default_guard_size):
       stackptrs(__fps_thd_stackptrs),
       stackbases(__fps_thd_stackbases),
-      stacksizes(__fps_thd_stacksizes)
+      stacksizes(__fps_thd_stacksizes),
+      default_stack_size(default_stack_size),
+      default_guard_size(default_guard_size)
   {
     stackptrs = CreateNewMap<void *>();
     stackbases = CreateNewMap<void *>();
@@ -66,14 +69,16 @@ public:
     growOne(stacksizes);
   }
 
-  void allocateStack(size_t index, size_t stacksize, size_t guardsize) {
+  void allocateStack(size_t index) {
     FPS_CHECK(index < getVecSize());
-    // NHM-FIXME: Do guard.
-    void *stackbase = Mmap(nullptr, stacksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
-    stacksizes[index] = stacksize;
+    // NHM-FIXME: Could compute required guard for particular cpu model, based on ROB size.
+    void *stackbase = Mmap(nullptr, default_stack_size + default_guard_size,
+                           PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+    Mprotect((char *) stackbase, default_guard_size, PROT_NONE);
+    
+    stacksizes[index] = default_stack_size + default_guard_size;
     stackbases[index] = stackbase;
-    stackptrs[index] = static_cast<char *>(stackbase) + stacksize;
-    FPS_LOG("allocated stack for %s at %p-%p", names[index], stackbase, (char *) stackbase + stacksize);
+    stackptrs[index] = static_cast<char *>(stackbase) + default_stack_size + default_guard_size;
   }
 
   void deallocateStack(size_t index) {
@@ -178,25 +183,20 @@ __attribute__((constructor(0))) void init_main_thread() {
   Lock live_threads_lock(live_threads_mutex);
   if (live_threads)
     return;
-  
+
   map_length = getpagesize(); // NHM-FIXME: Maybe hard-code it instead?
-  __fps_thread = live_threads = new (malloc(sizeof(LiveThread))) LiveThread();
-  names = (const char **) malloc(getpagesize());
 
-  pthread_key_create(&thread_cleanup_key, thread_cleanup_handler);
+  size_t stack_size = kDefaultFPSSize;
+  size_t guard_size = 4096;
+  struct rlimit limit;
+  if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY)
+    stack_size = limit.rlim_cur;
+  
+  __fps_thread = live_threads = new (malloc(sizeof(LiveThread))) LiveThread(stack_size, guard_size);
 
-#if 0
-  int rv;
-  pthread_mutexattr_t mutexattr;
-  rv = pthread_mutexattr_init(&mutexattr);
-  FPS_CHECK(rv >= 0);
-  rv = pthread_mutexattr_settype(&mutexattr, PTHREAD_MUTEX_ERRORCHECK);
-  FPS_CHECK(rv >= 0);
-  rv = pthread_mutex_init(&live_threads_mutex, &mutexattr);
-  FPS_CHECK(rv >= 0);
-  rv = pthread_mutex_init(&dead_threads_mutex, &mutexattr);
-  FPS_CHECK(rv >= 0);
-#endif
+  // Setup the thread cleanup handler.
+  if (pthread_key_create(&thread_cleanup_key, thread_cleanup_handler) < 0)
+    FPS_CHECK(false); // NHM-FIXME: FPS_ERR()
 }
 
 // NHM-NOTE: This doesn't need a lock b/c all callers have locked stuff.
@@ -207,13 +207,10 @@ size_t getUnusedIndex() {
     if (!__fps_thd_stackptrs[i])
       return i;
   
-  // NHM-FIXME: grow updates the thread-local buffer pointers, but we're calling this for all threads.
-  // Definitely a bug. 
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
     thread->grow();
   map_length *= 2;
   FPS_CHECK(i < getVecSize());
-  names = (const char **) realloc(names, map_length); // NHM-FIXME: Check.
   return i;
 }
 
@@ -223,19 +220,16 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack(const 
   Lock live_threads_lock(live_threads_mutex);
   
   const size_t index = getUnusedIndex();
-  const size_t stacksize = kDefaultFPSSize;
-  const size_t guardsize = getpagesize(); // NHM-FIXME
   FPS_LOG("registering %s (%" PRIu64 ")", name, index);
-  names[index] = name;
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
-    thread->allocateStack(index, stacksize, guardsize);
+    thread->allocateStack(index);
   return index * sizeof(void *); // NHM-FIXME
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index, const char *name) {
   Lock live_threads_lock(live_threads_mutex);
   
-  index /= sizeof(void *); // NHM-FIXME: This should be moved into FPS's generated consturctor/destructor code, instead.
+  index /= sizeof(void *); // NHM-FIXME: This should be moved into FPS's generated constructor/destructor code, instead.
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
     thread->deallocateStack(index);
   FPS_LOG("deregistered %s (%" PRIu64 ")", name, index);
@@ -245,6 +239,8 @@ extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t
 struct tinfo {
   void *(*start_routine)(void *);
   void *arg;
+  size_t stack_size;
+  size_t guard_size;
 };
 
 void *thread_start(void *arg) {
@@ -253,17 +249,14 @@ void *thread_start(void *arg) {
   tinfo *info = (tinfo *) arg;
 
   // Create a new thread.
-  size_t size = kDefaultFPSSize;
-  size_t guard = getpagesize(); // NHM-FIXME
-
   LiveThread *ref_thread = live_threads;
   assert(__fps_thread == nullptr);
-  __fps_thread = new (malloc(sizeof(LiveThread))) LiveThread();
+  __fps_thread = new (malloc(sizeof(LiveThread))) LiveThread(info->stack_size, info->guard_size);
   __fps_thread->next = ref_thread;
   live_threads = __fps_thread;
   for (size_t i = 0; i < getVecSize(); ++i)
     if (ref_thread->stacksizes[i])
-      __fps_thread->allocateStack(i, size, guard);
+      __fps_thread->allocateStack(i);
 
   pthread_setspecific(thread_cleanup_key, (void *) 1);
 
@@ -333,6 +326,20 @@ extern "C" __attribute__((visibility("default"))) int __interceptor_pthread_crea
   tinfo *info = (tinfo *) malloc(sizeof(tinfo));
   info->arg = arg;
   info->start_routine = start_routine;
+
+  if (attr) {
+    pthread_attr_getstacksize(attr, &info->stack_size);
+    pthread_attr_getguardsize(attr, &info->guard_size);
+  } else {
+    // get pthread default stack size
+    pthread_attr_t tmpattr;
+    pthread_attr_init(&tmpattr);
+    pthread_attr_getstacksize(&tmpattr, &info->stack_size);
+    pthread_attr_getguardsize(&tmpattr, &info->guard_size);
+    pthread_attr_destroy(&tmpattr);
+  }
+
+  FPS_CHECK(info->stack_size);
 
   return ___interceptor_pthread_create(thread, attr, thread_start, info);
 }
