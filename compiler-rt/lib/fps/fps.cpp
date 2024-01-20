@@ -19,7 +19,7 @@ void thread_cleanup_handler(void *_iter);
 void garbage_collect_threads(void);
 
 /// Default size of function-private stacks.
-const unsigned kDefaultFPSSize = 0x100000;
+const unsigned kDefaultFPSSize = 0x2800000;
 
 // NHM-FIXME: MAke a static variable of Livethread?
 size_t map_length = 0;
