@@ -8,6 +8,7 @@
 #include "safestack/safestack_platform.h"
 #include "fps/fps_util.h"
 
+// NHM-FIXME: fps -> __fps.
 namespace fps {
 
 
@@ -349,6 +350,7 @@ struct GlobalContext {
   void **stackptrs;
 };
 
+// NOTE: Rather than using malloc(), can use a stack-like, mmap-backed structure.
 extern "C" __attribute__((visibility("default"))) GlobalContext *__fps_ctx_save() {
   GlobalContext *ctx = (GlobalContext *) malloc(sizeof(GlobalContext));
   ctx->num_stackptrs = getVecSize();

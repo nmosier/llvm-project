@@ -64,7 +64,10 @@ inline void *Mmap(void *addr, size_t length, int prot, int flags, int fd = -1, o
 
 inline void Mprotect(void *addr, size_t length, int prot) {
   int rv = safestack::Mprotect(addr, length, prot);
-  FPS_CHECK(rv == 0);
+  if (rv < 0) {
+    perror("[fps] mprotect");
+    abort();
+  }
 }
 
 template <typename T>
