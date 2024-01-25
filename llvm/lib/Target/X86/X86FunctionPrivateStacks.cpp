@@ -63,6 +63,8 @@ private:
   void partialRedundancyElimination(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, ArrayRef<MachineInstr *> Kills, SmallVectorImpl<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> &InsertPts);
 
   void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, const DenseMap<int, uint64_t>& PrivateFrameInfo);
+  // NHM-OPT: Could make it a fixed-size stack frame at first, set a flag in a thread-local variable __fps_stacktypes.
+  void emitRegStack(MachineFunction &MF);
   void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
   void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);
 };
@@ -87,56 +89,115 @@ static bool getFreeRegs(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI,
 }
 
 static MCPhysReg getSpillableReg(const LivePhysRegs &LPR, const TargetRegisterInfo *TRI, const MachineRegisterInfo &MRI) {
-    auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
-      if (LPR.contains(Reg))
-        return true;
-      if (MRI.isReserved(Reg))
-        return false;
-      for (MCRegAliasIterator R(Reg, TRI, false); R.isValid(); ++R)
-        if (LPR.contains(*R))
-          return true;
+  auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
+    if (LPR.contains(Reg))
+      return true;
+    if (MRI.isReserved(Reg))
       return false;
-    });
-    if (it == std::end(X86::GR64RegClass))
-      return X86::NoRegister;
-    else
-      return *it;
-  };
+    for (MCRegAliasIterator R(Reg, TRI, false); R.isValid(); ++R)
+      if (LPR.contains(*R))
+        return true;
+    return false;
+  });
+  if (it == std::end(X86::GR64RegClass))
+    return X86::NoRegister;
+  else
+    return *it;
+};
+
 
 
 void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) {
   if (PrivateFrameSize == 0)
     return;
   
-  MachineBasicBlock &MBB = MF.front();
-  auto MBBI = MBB.begin();
+  MachineBasicBlock &EntryMBB = MF.front();
+  auto EntryMBBI = EntryMBB.begin();
   const auto &MRI = MF.getRegInfo();
 
   SmallVector<MCPhysReg, 2> Regs;
   LivePhysRegs LPR(*TRI);
-  LPR.addLiveIns(MBB);
+  LPR.addLiveIns(EntryMBB);
   if (!getFreeRegs(LPR, MRI, 2, Regs))
     report_fatal_error("Failed to get free registers for FPS prologue!");
   assert(Regs.size() == 2);
   assert(!LPR.contains(X86::EFLAGS));
-  
-  getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStackPtrsSym, Regs[0]);
-  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
+
+  MachineBasicBlock &LoadMBB = *MF.CreateMachineBasicBlock();
+  MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
+  MF.push_back(&AllocMBB);
+  MF.push_front(&LoadMBB);
+  const auto LoadMBBI = LoadMBB.end();
+
+  getPointerToFPSData(LoadMBB, LoadMBBI, DebugLoc(), ThdStackPtrsSym, Regs[0]);
+  BuildMI(LoadMBB, LoadMBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
       .addReg(Regs[0])
       .addImm(1)
       .addReg(X86::NoRegister)
       .addImm(0)
       .addReg(X86::NoRegister);
-  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::SUB64ri32), Regs[1])
+
+  // cmp r1, 0
+  BuildMI(LoadMBB, LoadMBBI, DebugLoc(), TII->get(X86::OR64rr), Regs[1]).addReg(Regs[1]).addReg(Regs[1]);
+
+  // jz <alloc>
+  TII->insertBranch(LoadMBB, &AllocMBB, &EntryMBB, {MachineOperand::CreateImm(X86::COND_E)}, DebugLoc());
+  LoadMBB.addSuccessor(&AllocMBB);
+  LoadMBB.addSuccessor(&EntryMBB);
+
+  for (auto &LI : EntryMBB.liveins()) {
+    LoadMBB.addLiveIn(LI);
+    AllocMBB.addLiveIn(LI);
+  }
+
+
+  // ALLOCATE:
+  //  <save liveregs to stack>
+  //  call void @__fps_allocstack(@__fps_stackidx_<name>)
+  //  <restore liveregs from stack>
+
+  const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
+  BuildMI(AllocMBB, AllocMBB.end(), DebugLoc(), TII->get(X86::MOV64rm), X86::RDI)
+      .addReg(X86::RIP)
+      .addImm(1)
+      .addReg(0)
+      .addGlobalAddress(StackIdxSym)
+      .addReg(0);
+  BuildMI(AllocMBB, AllocMBB.end(), DebugLoc(), TII->get(X86::CALL64pcrel32))
+      .addExternalSymbol("__fps_allocstack")
+      .addRegMask(RegMask);
+  MFI->setAdjustsStack(true);
+  MFI->setHasCalls(true);
+
+  const auto AllocPreMBBI = AllocMBB.begin();
+  for (auto &LI : AllocMBB.liveins()) {
+    const auto Reg = LI.PhysReg;
+    const auto *RC = TRI->getMinimalPhysRegClass(Reg);
+    int FI = MFI->CreateSpillStackObject(TRI->getSpillSize(*RC), TRI->getSpillAlign(*RC));
+    TII->storeRegToStackSlot(AllocMBB, AllocPreMBBI, Reg, true, FI, RC, TRI, X86::NoRegister);
+    TII->loadRegFromStackSlot(AllocMBB, AllocMBB.end(), Reg, FI, RC, TRI, X86::NoRegister);
+  }
+  TII->insertUnconditionalBranch(AllocMBB, &LoadMBB, DebugLoc());
+  AllocMBB.addSuccessor(&LoadMBB);
+  
+  // ENTRY: real entry code now
+  EntryMBB.addLiveIn(Regs[0]);
+  EntryMBB.addLiveIn(Regs[1]);
+  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::SUB64ri32), Regs[1])
       .addReg(Regs[1])
       .addImm(PrivateFrameSize);
-  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mr))
+  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::MOV64mr))
       .addReg(Regs[0])
       .addImm(1)
       .addReg(X86::NoRegister)
       .addImm(0)
       .addReg(X86::NoRegister)
       .addReg(Regs[1]);
+
+  // Ensure that the entry block has 0 successors
+  MachineBasicBlock &EmptyMBB = *MF.CreateMachineBasicBlock();
+  MF.push_front(&EmptyMBB);
+  EmptyMBB.addSuccessor(&LoadMBB);
 }
 
 void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {

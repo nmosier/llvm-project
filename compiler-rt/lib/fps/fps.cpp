@@ -33,6 +33,7 @@ extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_
 extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackbases = nullptr;
 extern "C" __attribute__((visibility("default"))) thread_local uint64_t *__fps_thd_stacksizes = nullptr;
 // TODO: add global, realloc'ed array of bools to determine if index is active.
+char *registered = nullptr;
 
 
 
@@ -70,23 +71,31 @@ public:
     growOne(stacksizes);
   }
 
+  void registerStack(size_t index) {
+    FPS_CHECK(index < getVecSize());
+    FPS_CHECK(stackbases[index] == nullptr && stackptrs[index] == nullptr);
+#if 0
+    stacksizes[index] = default_stack_size + default_guard_size;
+#endif
+  }
+
   void allocateStack(size_t index) {
     FPS_CHECK(index < getVecSize());
+    FPS_CHECK(stacksizes[index] == 0 && stackbases[index] == nullptr && stackptrs[index] == nullptr);
     // NHM-FIXME: Could compute required guard for particular cpu model, based on ROB size.
     void *stackbase = Mmap(nullptr, default_stack_size + default_guard_size,
                            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
     Mprotect((char *) stackbase, default_guard_size, PROT_NONE);
-    
     stacksizes[index] = default_stack_size + default_guard_size;
     stackbases[index] = stackbase;
     stackptrs[index] = static_cast<char *>(stackbase) + default_stack_size + default_guard_size;
+    FPS_CHECK(stacksizes[index] > 0 && stackbases[index] != nullptr && stackptrs[index] != nullptr);
   }
 
   void deallocateStack(size_t index) {
-    assert(index < getVecSize());
-    assert(stacksizes[index]);
-    assert(stackbases[index]);
-    safestack::Munmap(stackbases[index], stacksizes[index]);
+    FPS_CHECK(index < getVecSize());
+    if (stackbases[index])
+      safestack::Munmap(stackbases[index], stacksizes[index]);
     stacksizes[index] = 0;
     stackbases[index] = nullptr;
     stackptrs[index] = nullptr;
@@ -151,14 +160,14 @@ public:
   }
 
   ~DeadThread() {
-    assert(!(pid == getpid() && tid == safestack::GetTid()));
+    FPS_CHECK(!(pid == getpid() && tid == safestack::GetTid()));
 
     // Unmap stacks.
     const size_t num_stacks = length / sizeof(uintptr_t);
     for (size_t i = 0; i < num_stacks; ++i) {
       if (stacksizes[i] == 0)
         continue;
-      assert(stackbases[i]);
+      FPS_CHECK(stackbases[i]);
       safestack::Munmap(stackbases[i], stacksizes[i]); // NHM-tODO CHECK RET
     }
 
@@ -187,6 +196,10 @@ __attribute__((constructor(0))) void init_main_thread() {
 
   map_length = getpagesize(); // NHM-FIXME: Maybe hard-code it instead?
 
+  // NHM-FIXME: Invert getVecSize() and map_length.
+  registered = (decltype(registered)) calloc(getVecSize(), sizeof *registered);
+  FPS_CHECK(registered);
+
   size_t stack_size = kDefaultFPSSize;
   size_t guard_size = 4096;
   struct rlimit limit;
@@ -201,17 +214,25 @@ __attribute__((constructor(0))) void init_main_thread() {
 }
 
 // NHM-NOTE: This doesn't need a lock b/c all callers have locked stuff.
+// NHM-FIXME: Update name to reflect we're also allocating it.
+// like 'claimUnusedIndex'
 size_t getUnusedIndex() {
   garbage_collect_threads();
   size_t i;
   for (i = 0; i < getVecSize(); ++i)
-    if (!__fps_thd_stackptrs[i])
+    if (!registered[i])
       return i;
-  
+
+  FPS_LOG("growing maps %" PRIu64 " -> %" PRIu64, map_length, map_length * 2);
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
     thread->grow();
+  size_t old_vec_size = getVecSize();
   map_length *= 2;
+  registered = (decltype(registered)) reallocarray(registered, getVecSize(), sizeof *registered);
+  FPS_CHECK(registered);
+  memset(registered + old_vec_size, 0, (getVecSize() - old_vec_size) * sizeof *registered);
   FPS_CHECK(i < getVecSize());
+  FPS_CHECK(!registered[i]);
   return i;
 }
 
@@ -221,9 +242,10 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack(const 
   Lock live_threads_lock(live_threads_mutex);
   
   const size_t index = getUnusedIndex();
+  registered[index] = true;
   FPS_LOG("registering %s (%" PRIu64 ")", name, index);
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
-    thread->allocateStack(index);
+    thread->registerStack(index);
   return index * sizeof(void *); // NHM-FIXME
 }
 
@@ -234,6 +256,21 @@ extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
     thread->deallocateStack(index);
   FPS_LOG("deregistered %s (%" PRIu64 ")", name, index);
+}
+
+extern "C" __attribute__((visibility("default"))) void __fps_allocstack(uint64_t index) {
+  index /= sizeof(void *);
+  FPS_LOG("allocstack %" PRIu64, index);
+  FPS_CHECK(__fps_thd_stacksizes[index] == 0 &&
+            __fps_thd_stackptrs[index] == nullptr &&
+            __fps_thd_stackbases[index] == nullptr &&
+            "allocstack called twice!");
+
+  __fps_thread->allocateStack(index);
+  FPS_CHECK(__fps_thd_stacksizes[index] != 0 &&
+            __fps_thd_stackptrs[index] != nullptr &&
+            __fps_thd_stackbases[index] != nullptr &&
+            "allocstack failed!");
 }
 
 // NHM-TODO: Will need to add thread specific info here, like stack size, etc.
@@ -251,7 +288,7 @@ void *thread_start(void *arg) {
 
   // Create a new thread.
   LiveThread *ref_thread = live_threads;
-  assert(__fps_thread == nullptr);
+  FPS_CHECK(__fps_thread == nullptr);
   __fps_thread = new (malloc(sizeof(LiveThread))) LiveThread(info->stack_size, info->guard_size);
   __fps_thread->next = ref_thread;
   live_threads = __fps_thread;
@@ -271,7 +308,7 @@ void garbage_collect_threads(void) {
   Lock dead_threads_lock(dead_threads_mutex);
   for (DeadThread **threadpp = &dead_threads; *threadpp; ) {
     DeadThread *thread = *threadpp;
-    assert(thread);
+    FPS_CHECK(thread);
     // NHM-FIXME: hoist getpid
     if (thread->pid != getpid() || (safestack::TgKill(thread->pid, thread->tid, 0) < 0 && errno == ESRCH)) {
       thread->~DeadThread();
@@ -286,7 +323,7 @@ void garbage_collect_threads(void) {
 void thread_cleanup_handler(void *_iter) {
   Lock live_threads_lock(live_threads_mutex);
 
-  assert(__fps_thread);
+  FPS_CHECK(__fps_thread);
 
   // Add this thread to the dead list.
   {
@@ -300,7 +337,7 @@ void thread_cleanup_handler(void *_iter) {
   LiveThread **live_thread = &live_threads;
   while (*live_thread != __fps_thread) {
     live_thread = &(*live_thread)->next;
-    assert(live_thread); // since we expect to find the thread in the list somewhere
+    FPS_CHECK(live_thread); // since we expect to find the thread in the list somewhere
   }
   *live_thread = (*live_thread)->next;
   __fps_thread->~LiveThread();
@@ -351,16 +388,25 @@ struct GlobalContext {
 };
 
 // NOTE: Rather than using malloc(), can use a stack-like, mmap-backed structure.
+// NHM-FIXME: I think we need some mutexes here.
 extern "C" __attribute__((visibility("default"))) GlobalContext *__fps_ctx_save() {
+  FPS_LOG("saving context");
   GlobalContext *ctx = (GlobalContext *) malloc(sizeof(GlobalContext));
   ctx->num_stackptrs = getVecSize();
-  ctx->stackptrs = (void **) malloc(sizeof(void *) * ctx->num_stackptrs);
+  ctx->stackptrs = (void **) calloc(ctx->num_stackptrs, sizeof(void *));
   memcpy(ctx->stackptrs, __fps_thd_stackptrs, map_length);
   return ctx;
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_ctx_restore(GlobalContext *ctx) {
+  FPS_LOG("restoring context");
+  FPS_CHECK(ctx->num_stackptrs <= getVecSize());
   memcpy(__fps_thd_stackptrs, ctx->stackptrs, ctx->num_stackptrs * sizeof(ctx->stackptrs[0]));
+  for (size_t i = 0; i < getVecSize(); ++i) {
+    if (__fps_thd_stackptrs[i] == nullptr && __fps_thd_stackbases[i] != nullptr) {
+      __fps_thd_stackptrs[i] = (char *) __fps_thd_stackbases[i] + __fps_thd_stacksizes[i];
+    }
+  }
   free(ctx->stackptrs);
   free(ctx);
 }

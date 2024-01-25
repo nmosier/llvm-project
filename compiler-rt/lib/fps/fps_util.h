@@ -70,6 +70,7 @@ inline void Mprotect(void *addr, size_t length, int prot) {
   }
 }
 
+#if 0
 template <typename T>
 class PinnedVector {
   static size_t calculateMinSize(size_t init_size) {
@@ -140,6 +141,7 @@ private:
     return x;
   }
 };
+#endif
 
 class Lock {
   pthread_mutex_t *mutex;
