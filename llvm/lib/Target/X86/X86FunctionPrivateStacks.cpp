@@ -58,7 +58,7 @@ private:
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
 
   bool frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses);
-  void instrumentSetjmps(MachineFunction &MF);
+  bool instrumentSetjmps(MachineFunction &MF);
 
   void partialRedundancyElimination(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, ArrayRef<MachineInstr *> Kills, SmallVectorImpl<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> &InsertPts);
 
@@ -67,6 +67,7 @@ private:
   void emitRegStack(MachineFunction &MF);
   void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
   void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);
+
 };
 
 static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
@@ -462,59 +463,15 @@ void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, Machi
       .addReg(X86::NoRegister);
 }
 
-void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
-  const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
-  
-  SmallVector<MachineInstr *> BuiltinSetjmps;
-  for (MachineBasicBlock &MBB : MF)
-    for (MachineInstr &MI : MBB)
-      if (MI.getOpcode() == X86::EH_SjLj_Setup)
-        BuiltinSetjmps.push_back(&MI);
-
-  // NHM-FIXME: Format of EH_SjLj_Setup <bb> <regmask>
-  for (MachineInstr *Setjmp : BuiltinSetjmps) {
-    DebugLoc Loc;
-    MachineBasicBlock *TargetMBB = Setjmp->getOperand(0).getMBB();
-
-    // Insert call to __fps_ctx_alloc. Note that it's okay that the call
-    // clobbers registers since EH_SjLj_Setup will clobber everything anyway.
-    // NHM-FIXME: Add assert to verify this.
-    // NHM-FIXME: Should probably move this afterwards?
-    BuildMI(*Setjmp->getParent(), Setjmp->getIterator(), Loc, TII->get(X86::CALL64pcrel32))
-        .addExternalSymbol("__fps_ctx_save")
-        .addRegMask(RegMask);
-    // NHM-FIXME: Make RAX implicit def?
-    // NHM-FIXME: Make work with x86-32.
-    const int CtxFI = MFI->CreateSpillStackObject(8, Align(8)); // NHM-FIXME: This shall not be moved to function-private stack!
-    BuildMI(*Setjmp->getParent(), Setjmp->getIterator(), Loc, TII->get(X86::MOV64mr))
-        .addFrameIndex(CtxFI)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(0)
-        .addReg(X86::NoRegister)
-        .addReg(X86::RAX);
-
-    // At longjmp target, restore context.
-    // NHM-FIXME: Assert no registers are live here.
-    const auto TargetMBBI = TargetMBB->begin();
-    BuildMI(*TargetMBB, TargetMBBI, Loc, TII->get(X86::MOV64rm), X86::RDI)
-        .addFrameIndex(CtxFI)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(0)
-        .addReg(X86::NoRegister);
-    // NHM-FIXME: Make RDI implicit use?
-    BuildMI(*TargetMBB, TargetMBBI, Loc, TII->get(X86::CALL64pcrel32))
-        .addExternalSymbol("__fps_ctx_restore")
-        .addRegMask(RegMask);
-  }
-
-
-
-  // Real C setjmps/longjmps.
-  SmallVector<MachineInstr *> ExternalSetjmps;
+bool X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
+  // Does this function have setjmps?
+  SmallVector<MachineInstr *> BuiltinSetjmps, ExternalSetjmps;
   for (MachineBasicBlock &MBB : MF) {
     for (MachineInstr &MI : MBB) {
+      if (MI.getOpcode() == X86::EH_SjLj_Setup) {
+        BuiltinSetjmps.push_back(&MI);
+        continue;
+      }
       if (!MI.isCall()) // NHM-FIXME: Are indirect calls considered to be indirect branches?
         continue;
       if (MI.mayLoadOrStore()) {
@@ -531,12 +488,105 @@ void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
     }
   }
 
+  if (BuiltinSetjmps.empty() && ExternalSetjmps.empty())
+    return false;
+
+  const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
+
+  // Allocate context stack slot at function entrypoint and zero-initialize.
+  const int CtxFI = MFI->CreateSpillStackObject(8, Align(8));
+  BuildMI(MF.front(), MF.front().begin(), DebugLoc(), TII->get(X86::MOV64mi32))
+      .addFrameIndex(CtxFI)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::NoRegister)
+      .addImm(0);
+
+  // Pop context on return.
+  for (MachineBasicBlock &MBB : MF) {
+    if (!MBB.succ_empty())
+      continue;
+    assert(!MBB.empty());
+    MachineInstr &Ret = MBB.back();
+    if (!Ret.isReturn())
+      continue;
+    const auto MBBI = Ret.getIterator();
+
+    LivePhysRegs LPR(*TRI);
+    LPR.addLiveOuts(MBB);
+    LPR.stepBackward(Ret);
+    SmallVector<std::pair<MCPhysReg, int>> FIs;
+    for (const MachineOperand &MO : Ret.uses()) {
+      if (MO.isReg() && MO.isUse()) {
+        const auto Reg = MO.getReg();
+        const auto *RC = TRI->getMinimalPhysRegClass(Reg);
+        const auto FI = MFI->CreateSpillStackObject(TRI->getSpillSize(*RC), TRI->getSpillAlign(*RC));
+        FIs.emplace_back(Reg, FI);
+        TII->storeRegToStackSlot(MBB, MBBI, Reg, /*isKill*/true, FI, RC, TRI, X86::NoRegister);
+      }
+    }
+    TII->loadRegFromStackSlot(MBB, MBBI, X86::RDI, CtxFI, &X86::GR64RegClass, TRI, X86::NoRegister);
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::CALLpcrel32))
+        .addExternalSymbol("__fps_ctx_pop")
+        .addRegMask(RegMask)
+        .addUse(X86::RDI, RegState::ImplicitKill);
+    for (const auto &[Reg, FI] : FIs) {
+      TII->loadRegFromStackSlot(MBB, MBBI, Reg, FI, TRI->getMinimalPhysRegClass(Reg), TRI, X86::NoRegister);
+    }
+  }
+  
+  // NHM-FIXME: Format of EH_SjLj_Setup <bb> <regmask>
+  for (MachineInstr *Setjmp : BuiltinSetjmps) {
+    DebugLoc Loc;
+    MachineBasicBlock *TargetMBB = Setjmp->getOperand(0).getMBB();
+
+    // Entry: MOV [old.FI], nullptr
+    // 
+    // MOV %rdi, old.FI
+    // CALLpcrel32 __fps_ctx_save(%rdi=old) 
+    // EH_SjLj_Setup target <regmask>
+    //
+    // target:
+    
+
+    // Insert call to __fps_ctx_alloc. Note that it's okay that the call
+    // clobbers registers since EH_SjLj_Setup will clobber everything anyway.
+    // NHM-FIXME: Add assert to verify this.
+    // NHM-FIXME: Should probably move this afterwards?
+    TII->loadRegFromStackSlot(*Setjmp->getParent(), Setjmp->getIterator(), X86::RDI, CtxFI, &X86::GR64RegClass, TRI, X86::NoRegister);
+    BuildMI(*Setjmp->getParent(), Setjmp->getIterator(), Loc, TII->get(X86::CALL64pcrel32))
+        .addExternalSymbol("__fps_ctx_push")
+        .addRegMask(RegMask)
+        .addUse(X86::RDI, RegState::ImplicitKill)
+        .addDef(X86::RAX, RegState::Implicit);
+    TII->storeRegToStackSlot(*Setjmp->getParent(), Setjmp->getIterator(), X86::RAX, /*isKill*/true, CtxFI, &X86::GR64RegClass, TRI, X86::NoRegister);
+
+    // At longjmp target, restore context.
+    // NHM-FIXME: Assert no registers are live here.
+    const auto TargetMBBI = TargetMBB->begin();
+    BuildMI(*TargetMBB, TargetMBBI, Loc, TII->get(X86::MOV64rm), X86::RDI)
+        .addFrameIndex(CtxFI)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+    // NHM-FIXME: Make RDI implicit use?
+    BuildMI(*TargetMBB, TargetMBBI, Loc, TII->get(X86::CALL64pcrel32))
+        .addExternalSymbol("__fps_ctx_restore")
+        .addRegMask(RegMask)
+        .addUse(X86::RDI, RegState::ImplicitKill);
+  }
+
+
+
+  // Real C setjmps/longjmps.
   for (MachineInstr *Setjmp : ExternalSetjmps) {
     DebugLoc Loc;
     MachineBasicBlock &MBB = *Setjmp->getParent();
     MachineBasicBlock::iterator MBBI = std::next(Setjmp->getIterator());
-    const int CtxFI = MFI->CreateSpillStackObject(8, Align(8));
 
+    // NHM-FIXME: Assert we're not clobbering additional registers here. 
     BuildMI(MBB, MBBI, Loc, TII->get(X86::LEA64r), X86::RDI)
         .addFrameIndex(CtxFI)
         .addImm(1)
@@ -546,10 +596,15 @@ void X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
     BuildMI(MBB, MBBI, Loc, TII->get(X86::COPY), X86::ESI)
         .addReg(X86::EAX); // NHM-FIXME: kill?
     BuildMI(MBB, MBBI, Loc, TII->get(X86::CALL64pcrel32))
-        .addExternalSymbol("__fps_ctx_save_or_restore")
-        .addRegMask(RegMask);
+        .addExternalSymbol("__fps_ctx_push_or_restore")
+        .addRegMask(RegMask)
+        .addUse(X86::RDI, RegState::ImplicitKill)
+        .addUse(X86::ESI, RegState::ImplicitKill)
+        .addDef(X86::EAX, RegState::Implicit);
   }
-  
+
+
+  return true;
 }
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
@@ -733,7 +788,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     Info.Reg = LI.PhysReg;
     Info.RC = TRI->getMinimalPhysRegClass(Info.Reg);
     const auto SpillSize = TRI->getSpillSize(*Info.RC);
-    Info.FI = MFI.CreateSpillStackObject(SpillSize, Align(SpillSize));
+    Info.FI = MFI.CreateSpillStackObject(SpillSize, Align(SpillSize)); // NHM-FIXME: Should get spill align
     TII->storeRegToStackSlot(AllocMBB, AllocMBBI, Info.Reg, true, Info.FI, Info.RC, TRI, X86::NoRegister);
     ArgSpillInfos.push_back(Info);
   }

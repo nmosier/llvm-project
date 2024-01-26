@@ -382,40 +382,81 @@ extern "C" __attribute__((visibility("default"))) int __interceptor_pthread_crea
   return ___interceptor_pthread_create(thread, attr, thread_start, info);
 }
 
-struct GlobalContext {
+struct fps_ctx_t {
   size_t num_stackptrs;
   void **stackptrs;
+  fps_ctx_t *next;
 };
 
-// NOTE: Rather than using malloc(), can use a stack-like, mmap-backed structure.
-// NHM-FIXME: I think we need some mutexes here.
-extern "C" __attribute__((visibility("default"))) GlobalContext *__fps_ctx_save() {
-  FPS_LOG("saving context");
-  GlobalContext *ctx = (GlobalContext *) malloc(sizeof(GlobalContext));
+thread_local fps_ctx_t *ctx_top = nullptr;
+
+
+// NHM-FIXME: Need mutexes!
+extern "C" __attribute__((visibility("default"))) fps_ctx_t *__fps_ctx_push(fps_ctx_t *ctx) {
+  if (ctx)
+    return ctx;
+
+  FPS_LOG("pushing context");
+
+  // Calculate how much memory we need.
+  ctx = (fps_ctx_t *) malloc(sizeof(fps_ctx_t));
+  FPS_CHECK(ctx);
   ctx->num_stackptrs = getVecSize();
-  ctx->stackptrs = (void **) calloc(ctx->num_stackptrs, sizeof(void *));
-  memcpy(ctx->stackptrs, __fps_thd_stackptrs, map_length);
+  ctx->stackptrs = (void **) malloc(ctx->num_stackptrs * sizeof(void *));
+  FPS_CHECK(ctx->stackptrs);
+  memcpy(ctx->stackptrs, __fps_thd_stackptrs, ctx->num_stackptrs * sizeof(void *));
+  ctx->next = nullptr;
+
+  // Append to the stack.
+  fps_ctx_t **nextp;
+  for (nextp = &ctx_top; *nextp; nextp = &(**nextp).next) {}
+  *nextp = ctx;
+
   return ctx;
 }
 
-extern "C" __attribute__((visibility("default"))) void __fps_ctx_restore(GlobalContext *ctx) {
+extern "C" __attribute__((visibility("default"))) void __fps_ctx_pop(fps_ctx_t *ctx) {
+  if (!ctx)
+    return;
+
+  FPS_LOG("popping context");
+  
+  FPS_CHECK(ctx->next == nullptr);
+  fps_ctx_t **prevp;
+  for (prevp = &ctx_top; *prevp != ctx; prevp = &(**prevp).next) {}
+  free(ctx->stackptrs);
+  free(ctx);
+  *prevp = nullptr;
+}
+
+extern "C" __attribute__((visibility("default"))) void __fps_ctx_restore(fps_ctx_t *ctx) {
   FPS_LOG("restoring context");
+  FPS_CHECK(ctx);
   FPS_CHECK(ctx->num_stackptrs <= getVecSize());
-  memcpy(__fps_thd_stackptrs, ctx->stackptrs, ctx->num_stackptrs * sizeof(ctx->stackptrs[0]));
+  memcpy(__fps_thd_stackptrs, ctx->stackptrs, ctx->num_stackptrs * sizeof(void *));
+
   for (size_t i = 0; i < getVecSize(); ++i) {
     if (__fps_thd_stackptrs[i] == nullptr && __fps_thd_stackbases[i] != nullptr) {
       __fps_thd_stackptrs[i] = (char *) __fps_thd_stackbases[i] + __fps_thd_stacksizes[i];
     }
   }
-  free(ctx->stackptrs);
-  free(ctx);
+
+  // Erase rest of list (not including this context, since it might be re-used).
+  for (fps_ctx_t *next = ctx->next; next; ) {
+    fps_ctx_t *dead_ctx = next;
+    next = dead_ctx->next;
+    free(dead_ctx->stackptrs);
+    free(dead_ctx);
+  }
+  ctx->next = nullptr;
 }
 
-extern "C" __attribute__((visibility("default"))) int __fps_ctx_save_or_restore(GlobalContext **ctx, int setjmp_retval) {
-  if (setjmp_retval)
-    __fps_ctx_restore(*ctx);
-  else
-    *ctx = __fps_ctx_save();
+extern "C" __attribute__((visibility("default"))) int __fps_ctx_push_or_restore(fps_ctx_t *&ctx, int setjmp_retval) {
+  if (setjmp_retval) {
+    __fps_ctx_restore(ctx);
+  } else {
+    ctx = __fps_ctx_push(ctx);
+  }
   return setjmp_retval;
 }
 
