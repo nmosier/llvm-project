@@ -8,6 +8,8 @@
 #include "safestack/safestack_platform.h"
 #include "fps/fps_util.h"
 
+// NHM-FIXME: Memory leak occurs when we resize arrays, methinks.
+
 // NHM-FIXME: fps -> __fps.
 namespace fps {
 

@@ -681,10 +681,14 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   emitPrologue(MF, PrivateFrameSize);
   emitEpilogue(MF, PrivateFrameSize);
 
+  // Erase unused stack slots.
+  for (const auto &[FI, _] : PrivateFrameInfo)
+    MFI->RemoveStackObject(FI);
 
   MF.verify();
 
   instrumentSetjmps(MF);
+
 
   return true;
 }
