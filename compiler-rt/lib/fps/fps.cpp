@@ -13,8 +13,9 @@
 // NHM-FIXME: fps -> __fps.
 namespace fps {
 
-
 namespace {
+
+void *placeholder = (void *) 0xdeadbeef; // NHM-FIXME: add real placeholder
 
 using ThreadID = safestack::ThreadId;
 
@@ -29,21 +30,18 @@ size_t map_length = 0;
 
 size_t getVecSize();
 
+// NHM-FIXME: Make it illegal to copy this.
 struct fps_t {
   void *stackptr;
   void *stackbase;
   uintptr_t stacksize;
 
-  fps_t(): stackptr(nullptr), stackbase(nullptr), stacksize(0) {}
+  fps_t(): stackptr(placeholder), stackbase(nullptr), stacksize(0) {}
 
   operator bool() const {
-    if (stackptr) {
-      FPS_CHECK(stackbase && stacksize);
-      return true;
-    } else {
-      FPS_CHECK(!stackbase && !stacksize);
-      return false;
-    }
+    FPS_CHECK((stackbase && stacksize) ||
+              (!stackbase && !stacksize));
+    return stackbase != nullptr;
   }
 
   bool allocated() const {
@@ -64,7 +62,7 @@ struct fps_t {
     if (safestack::Munmap(stackbase, stacksize) < 0)
       FPS_CHECK(false);
     stackbase = nullptr;
-    stackptr = nullptr;
+    stackptr = placeholder;
     stacksize = 0;
     FPS_CHECK(!allocated());
   }
@@ -80,8 +78,9 @@ struct fps_t {
 
   void setStackPointer(void *sp) {
     if (!allocated()) {
-      FPS_CHECK(sp == nullptr);
-    } else if (sp == nullptr) {
+      FPS_CHECK(sp == placeholder);
+      FPS_CHECK(stackptr == placeholder);
+    } else if (sp == placeholder) {
       resetStackPointer();
     } else {
       FPS_CHECK(stackbase <= sp && sp <= (char *) stackbase + stacksize);
@@ -145,11 +144,14 @@ public:
 private:
   template <typename T>
   static T *CreateNewMap() {
-    return (T *) Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+    T *map = (T *) Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+    for (size_t i = 0; i < map_length / sizeof(T); ++i)
+      new (&map[i]) T();
+    return map;
   }
 
-  template <typename T, typename... Ts>
-  static void growOne(T *&map, const Ts&... args) {
+  template <typename T>
+  static void growOne(T *&map) {
     void *old_map = map;
     void *new_map = Mremap(old_map, map_length, map_length * 2);
     if (new_map == MAP_FAILED) {
@@ -165,7 +167,7 @@ private:
     map = (T *) new_map;
 
     for (size_t i = map_length / sizeof(T); i < map_length * 2 / sizeof(T); ++i) {
-      new (&map[i]) T(args...);
+      new (&map[i]) T();
     }
   }  
 };
@@ -445,8 +447,10 @@ extern "C" __attribute__((visibility("default"))) fps_ctx_t *__fps_ctx_push(fps_
   ctx->num_stackptrs = getVecSize();
   ctx->stackptrs = (void **) malloc(ctx->num_stackptrs * sizeof(void *));
   FPS_CHECK(ctx->stackptrs);
-  for (size_t i = 0; i < ctx->num_stackptrs; ++i)
+  for (size_t i = 0; i < ctx->num_stackptrs; ++i) {
     ctx->stackptrs[i] = __fps_thd_stacks[i].stackptr;
+    FPS_CHECK(ctx->stackptrs[i] != nullptr);
+  }
   ctx->next = nullptr;
 
   // Append to the stack.

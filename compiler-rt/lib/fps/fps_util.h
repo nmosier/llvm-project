@@ -8,7 +8,7 @@
 
 #define FPS_DEBUG_ABORT 0
 
-#ifdef FPS_DEBUG_ABORT
+#if FPS_DEBUG_ABORT
 #define FPS_ABORT()                             \
   do {                                          \
     fprintf(stderr, "[fps] FATAL ERROR: attach to pid %d to debug\n", getpid()); \
