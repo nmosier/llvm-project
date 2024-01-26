@@ -27,38 +27,40 @@ class FunctionPrivateStacks {
   bool Changed;
   IntegerType *Int64Ty;
   PointerType *PtrTy;
-  FunctionCallee RegStack;
-  FunctionCallee DeregStack;
+  StructType *RegInfoTy;
   
-  void runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRBuilder<> &DtorIRB);
+  void runOnFunction(Function &F, std::vector<Constant *> &RegInfos);
   
 public:
   FunctionPrivateStacks(Module &M) : M(M), Ctx(M.getContext()), Changed(false) {}
   bool run();
 };
 
-void FunctionPrivateStacks::runOnFunction(Function &F, IRBuilder<> &CtorIRB, IRBuilder<> &DtorIRB) {
+void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &RegInfos) {
   // NHM-FIXME: Assert only works on 64-bit architectures.
 
   // NHM-FIXME: Should this always have private linkage?
   auto *StackIdxVar = new GlobalVariable(M, Int64Ty, /*isConstant*/false, GlobalVariable::InternalLinkage, Constant::getNullValue(Int64Ty) , "__fps_stackidx_" + F.getName());
   Constant *FnNameExpr = ConstantDataArray::getString(Ctx, F.getName(), true);
   Constant *FnName = new GlobalVariable(M, FnNameExpr->getType(), /*isConsatnt*/true, GlobalVariable::PrivateLinkage, FnNameExpr);
-  
+  RegInfos.push_back(ConstantStruct::get(RegInfoTy, StackIdxVar, FnName));
   
 
+#if 0
   // Register stack.
   Value *StackIdx = CtorIRB.CreateCall(RegStack, {FnName});
   CtorIRB.CreateStore(StackIdx, StackIdxVar);
 
   // Deregister stack.
   DtorIRB.CreateCall(DeregStack, {DtorIRB.CreateLoad(Int64Ty, StackIdxVar), FnName});
+#endif
 }
 
 bool FunctionPrivateStacks::run() {
   Int64Ty = IntegerType::get(Ctx, 64);
   PtrTy = PointerType::getUnqual(Ctx);
-    
+  RegInfoTy = StructType::get(PtrTy, PtrTy);
+
   // Declare thread-local variable.
   // NHM-FIXME: Not sure if these are necessary at this point.
   new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stackptrs");
@@ -71,23 +73,30 @@ bool FunctionPrivateStacks::run() {
   auto *Dtor = Function::Create(CtorTy, Function::InternalLinkage, "__fps_regstack_dtor", M);
   IRBuilder<> DtorIRB(BasicBlock::Create(Ctx, "", Dtor));
 
-  RegStack = Function::Create(FunctionType::get(Int64Ty, {PtrTy}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_regstack", M);
-  DeregStack = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Int64Ty, PtrTy}, /*isVarArg*/false), Function::ExternalLinkage, "__fps_deregstack", M);
+
+  std::vector<Constant *> RegInfos;
   
   for (Function &F : M)
     if (!F.isDeclaration() && !F.getName().starts_with("__fps_"))
-      runOnFunction(F, CtorIRB, DtorIRB);
+      runOnFunction(F, RegInfos);
 
+  Constant *RegInfoArr = ConstantArray::get(ArrayType::get(RegInfoTy, RegInfos.size()), RegInfos);
+  auto *RegInfoVar = new GlobalVariable(M, RegInfoArr->getType(), /*isConstant*/true, GlobalVariable::PrivateLinkage, RegInfoArr);
+
+  FunctionType *RegTy = FunctionType::get(Type::getVoidTy(Ctx), {Int64Ty, PtrTy}, /*isVarArg*/false);
+  FunctionCallee RegStacks = Function::Create(RegTy, Function::ExternalLinkage, "__fps_regstacks", M);
+  CtorIRB.CreateCall(RegStacks, {CtorIRB.getInt64(RegInfos.size()), RegInfoVar});
   CtorIRB.CreateRetVoid();
+
+  FunctionCallee DeregStacks = Function::Create(RegTy, Function::ExternalLinkage, "__fps_deregstacks", M);
+  DtorIRB.CreateCall(DeregStacks, {DtorIRB.getInt64(RegInfos.size()), RegInfoVar});
   DtorIRB.CreateRetVoid();
 
   appendToGlobalCtors(M, Ctor, 0);
   appendToGlobalDtors(M, Dtor, 0);
 
-#if 0
-  interceptPthreadCreate();
-#endif
-  
+  // NHM-FIXME: If there are no FPSes, then just skip.
+
   return Changed;
 }
 

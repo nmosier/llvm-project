@@ -249,6 +249,15 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack(const 
   return index * sizeof(void *); // NHM-FIXME
 }
 
+struct reginfo {
+  uint64_t *index;
+  const char *name;
+};
+extern "C" __attribute__((visibility("default"))) void __fps_regstacks(uint64_t n, const reginfo *vec) {
+  for (uint64_t i = 0; i < n; ++i)
+    *vec[i].index = __fps_regstack(vec[i].name);
+}
+
 extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index, const char *name) {
   Lock live_threads_lock(live_threads_mutex);
   
@@ -256,6 +265,11 @@ extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
     thread->deallocateStack(index);
   FPS_LOG("deregistered %s (%" PRIu64 ")", name, index);
+}
+
+extern "C" __attribute__((visibility("default"))) void __fps_deregstacks(uint64_t n, const reginfo *vec) {
+  for (uint64_t i = 0; i < n; ++i)
+    __fps_deregstack(*vec[i].index, vec[i].name);
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_allocstack(uint64_t index) {
