@@ -22,6 +22,12 @@ using namespace llvm;
 
 namespace {
 
+cl::opt<bool> EnableOverflowChecks(
+    PASS_KEY "-check-overflow",
+    cl::desc("Enable overflow checks"), // NHM-FIXME
+    cl::init(false),
+    cl::Hidden);
+
 cl::opt<bool> FPSParanoid(
     PASS_KEY "-paranoid",
     cl::desc("Perform additional checks to prevent unlikely attack scenarios. "
@@ -133,40 +139,45 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   assert(Regs.size() == 2);
   assert(!LPR.contains(X86::EFLAGS));
 
-  MachineBasicBlock &LoadMBB = *MF.CreateMachineBasicBlock();
-  MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
-  MF.push_back(&AllocMBB);
-  MF.push_front(&LoadMBB);
-  const auto LoadMBBI = LoadMBB.end();
+  const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
+  DebugLoc Loc;
 
-  getPointerToFPSData(LoadMBB, LoadMBBI, DebugLoc(), ThdStacksSym, Regs[0]);
-  BuildMI(LoadMBB, LoadMBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
+  MachineBasicBlock &NewEntryMBB = *MF.CreateMachineBasicBlock();
+  MachineBasicBlock &CheckMBB = *MF.CreateMachineBasicBlock();
+  MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
+  MF.push_front(&CheckMBB);
+  MF.push_front(&NewEntryMBB);
+  MF.push_back(&AllocMBB);
+  for (const auto &LI : EntryMBB.liveins()) {
+    CheckMBB.addLiveIn(LI);
+    AllocMBB.addLiveIn(LI);
+    NewEntryMBB.addLiveIn(LI);
+  }
+  EntryMBB.addLiveIn(Regs[0]);
+  NewEntryMBB.addSuccessor(&CheckMBB);
+
+  // CheckMBB:
+  //  fps_t *r0 <- get fps pointer
+  //  if (r0->stackbase == 0)
+  //    AllocMBB
+  getPointerToFPSData(CheckMBB, CheckMBB.end(), Loc, ThdStacksSym, Regs[0]);
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::CMP64mi8))
       .addReg(Regs[0])
       .addImm(1)
       .addReg(X86::NoRegister)
-      .addImm(0)
-      .addReg(X86::NoRegister);
-
-  // cmp r1, 0
-  BuildMI(LoadMBB, LoadMBBI, DebugLoc(), TII->get(X86::OR64rr), Regs[1]).addReg(Regs[1]).addReg(Regs[1]);
-
-  // jz <alloc>
-  TII->insertBranch(LoadMBB, &AllocMBB, &EntryMBB, {MachineOperand::CreateImm(X86::COND_E)}, DebugLoc());
-  LoadMBB.addSuccessor(&AllocMBB);
-  LoadMBB.addSuccessor(&EntryMBB);
-
-  for (auto &LI : EntryMBB.liveins()) {
-    LoadMBB.addLiveIn(LI);
-    AllocMBB.addLiveIn(LI);
-  }
+      .addImm(8) // NHM-FIXME: Symbolize
+      .addReg(X86::NoRegister)
+      .addImm(0);
+  TII->insertBranch(CheckMBB, &AllocMBB, &EntryMBB, {MachineOperand::CreateImm(X86::COND_E)}, DebugLoc());
+  CheckMBB.addSuccessor(&AllocMBB);
+  CheckMBB.addSuccessor(&EntryMBB);
 
 
-  // ALLOCATE:
-  //  <save liveregs to stack>
-  //  call void @__fps_allocstack(@__fps_stackidx_<name>)
-  //  <restore liveregs from stack>
-
-  const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
+  // AllocMBB:
+  //   save callee-saved registers
+  //   __fps_allocstack(__fps_stackidx_<name>);
+  //   restore callee-saved regsiters
+  //   jmp CheckMBB
   BuildMI(AllocMBB, AllocMBB.end(), DebugLoc(), TII->get(X86::MOV64rm), X86::RDI)
       .addReg(X86::RIP)
       .addImm(1)
@@ -175,7 +186,8 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
       .addReg(0);
   BuildMI(AllocMBB, AllocMBB.end(), DebugLoc(), TII->get(X86::CALL64pcrel32))
       .addExternalSymbol("__fps_allocstack")
-      .addRegMask(RegMask);
+      .addRegMask(RegMask)
+      .addUse(X86::RDI, RegState::ImplicitKill);
   MFI->setAdjustsStack(true);
   MFI->setHasCalls(true);
 
@@ -187,14 +199,19 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
     TII->storeRegToStackSlot(AllocMBB, AllocPreMBBI, Reg, true, FI, RC, TRI, X86::NoRegister);
     TII->loadRegFromStackSlot(AllocMBB, AllocMBB.end(), Reg, FI, RC, TRI, X86::NoRegister);
   }
-  TII->insertUnconditionalBranch(AllocMBB, &LoadMBB, DebugLoc());
-  AllocMBB.addSuccessor(&LoadMBB);
-  
-  // ENTRY: real entry code now
-  EntryMBB.addLiveIn(Regs[0]);
-  EntryMBB.addLiveIn(Regs[1]);
-  EntryMBB.addLiveIn(X86::EFLAGS);
-  // BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::CMOV64rr), 
+  TII->insertUnconditionalBranch(AllocMBB, &CheckMBB, DebugLoc());  
+  AllocMBB.addSuccessor(&CheckMBB);
+
+  // EntryMBB:
+  //  void *r1 = r1->stackptr;
+  //  r1 = r1 - PrivateFrameSize;
+  //  r0->stackptr = r1;
+  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
+      .addReg(Regs[0])
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0) // NHM-FIXME:L Symbolize
+      .addReg(X86::NoRegister);
   BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::SUB64ri32), Regs[1])
       .addReg(Regs[1])
       .addImm(PrivateFrameSize);
@@ -205,11 +222,6 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
       .addImm(0)
       .addReg(X86::NoRegister)
       .addReg(Regs[1]);
-
-  // Ensure that the entry block has 0 successors
-  MachineBasicBlock &EmptyMBB = *MF.CreateMachineBasicBlock();
-  MF.push_front(&EmptyMBB);
-  EmptyMBB.addSuccessor(&LoadMBB);
 }
 
 void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {
@@ -674,7 +686,6 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     }
   }
   PrivateFrameSize = llvm::alignTo(PrivateFrameSize, PrivateFrameAlign);
-
 
   // Collect restore points for stack pointer.
   assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses, PrivateFrameInfo);
