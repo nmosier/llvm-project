@@ -6,12 +6,25 @@
 
 #include "safestack/safestack_platform.h"
 
+#define FPS_DEBUG_ABORT 0
+
+#ifdef FPS_DEBUG_ABORT
+#define FPS_ABORT()                             \
+  do {                                          \
+    fprintf(stderr, "[fps] FATAL ERROR: attach to pid %d to debug\n", getpid()); \
+    volatile int x = 1;                                                 \
+    while (x) {}                                                        \
+  } while (false)
+#else
+#define FPS_ABORT() abort()
+#endif
+
 #define FPS_CHECK(a)                                            \
   do {                                                          \
     if (!(a)) {                                                 \
       fprintf(stderr, "fps CHECK failed: %s:%d %s\n", __FILE__, \
               __LINE__, #a);                                    \
-      abort();                                                  \
+      FPS_ABORT();                                              \
     }                                                           \
   } while (false)
 

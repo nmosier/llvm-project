@@ -55,8 +55,9 @@ private:
   const X86RegisterInfo *TRI;
   MachineFrameInfo *MFI;
   const GlobalValue *StackIdxSym;
-  const GlobalValue *ThdStackPtrsSym;
+  const GlobalValue *ThdStacksSym;
 
+  // NHM-FIXME: No longer need pointer to member.
   void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalValue *Member, Register Reg);
 
   // NOTE: Permits PtrReg == ValReg.
@@ -138,7 +139,7 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   MF.push_front(&LoadMBB);
   const auto LoadMBBI = LoadMBB.end();
 
-  getPointerToFPSData(LoadMBB, LoadMBBI, DebugLoc(), ThdStackPtrsSym, Regs[0]);
+  getPointerToFPSData(LoadMBB, LoadMBBI, DebugLoc(), ThdStacksSym, Regs[0]);
   BuildMI(LoadMBB, LoadMBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
       .addReg(Regs[0])
       .addImm(1)
@@ -231,7 +232,7 @@ void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Privat
     assert(Regs.size() == 2);
     assert(!LPR.contains(X86::EFLAGS));
 
-    getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStackPtrsSym, Regs[0]);
+    getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Regs[0]);
     BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
         .addReg(Regs[0])
         .addImm(1)
@@ -359,7 +360,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
             .addReg(X86::RIP)
             .addImm(1)
             .addReg(X86::NoRegister)
-            .addGlobalAddress(ThdStackPtrsSym, 0, X86II::MO_GOTTPOFF)
+            .addGlobalAddress(ThdStacksSym, 0, X86II::MO_GOTTPOFF)
             .addReg(X86::NoRegister);
         BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
             .addReg(ScratchReg)
@@ -420,7 +421,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
 }
 
 void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc) {
-  getPointerToFPSData(MBB, MBBI, Loc, ThdStackPtrsSym, Reg);
+  getPointerToFPSData(MBB, MBBI, Loc, ThdStacksSym, Reg);
   BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
       .addReg(Reg)
       .addImm(1)
@@ -638,8 +639,8 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
 
   StackIdxSym = M.getNamedValue(("__fps_stackidx_" + MF.getName()).str());
-  ThdStackPtrsSym = M.getNamedValue("__fps_thd_stackptrs");
-  assert(StackIdxSym && ThdStackPtrsSym);
+  ThdStacksSym = M.getNamedValue("__fps_thd_stacks");
+  assert(StackIdxSym && ThdStacksSym);
   // NHM-FIXME: Assertions.
 
   DebugLoc Loc;

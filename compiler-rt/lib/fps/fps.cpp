@@ -25,96 +25,129 @@ const unsigned kDefaultFPSSize = 0x2800000;
 // NHM-FIXME: MAke a static variable of Livethread?
 size_t map_length = 0;
 
-size_t getVecSize() {
-  return map_length / sizeof(void *);
-}
+size_t getVecSize();
 
-extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackptrs = nullptr;
-extern "C" __attribute__((visibility("default"))) thread_local void **__fps_thd_stackbases = nullptr;
-extern "C" __attribute__((visibility("default"))) thread_local uint64_t *__fps_thd_stacksizes = nullptr;
-// TODO: add global, realloc'ed array of bools to determine if index is active.
+struct fps_t {
+  void *stackptr;
+  void *stackbase;
+  uintptr_t stacksize;
+
+  fps_t(): stackptr(nullptr), stackbase(nullptr), stacksize(0) {}
+
+  operator bool() const {
+    if (stackptr) {
+      FPS_CHECK(stackbase && stacksize);
+      return true;
+    } else {
+      FPS_CHECK(!stackbase && !stacksize);
+      return false;
+    }
+  }
+
+  bool allocated() const {
+    return static_cast<bool>(*this);
+  }
+
+  void allocate(uintptr_t stacksize, uintptr_t guardsize) {
+    FPS_CHECK(!allocated());
+    stackbase = Mmap(nullptr, stacksize + guardsize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+    Mprotect((char *) stackbase, guardsize, PROT_NONE); // NHM-FIXME: need upper guard.
+    this->stacksize = stacksize + guardsize; // NHM-FIXME: Rename argument.
+    stackptr = (char *) stackbase + stacksize;
+    FPS_CHECK(allocated());
+  }
+
+  void deallocate() {
+    FPS_CHECK(allocated());
+    if (safestack::Munmap(stackbase, stacksize) < 0)
+      FPS_CHECK(false);
+    stackbase = nullptr;
+    stackptr = nullptr;
+    stacksize = 0;
+    FPS_CHECK(!allocated());
+  }
+
+  ~fps_t() {
+    if (allocated())
+      deallocate();
+  }
+
+  void resetStackPointer() {
+    stackptr = (char *) stackbase + stacksize;
+  }
+
+  void setStackPointer(void *sp) {
+    if (!allocated()) {
+      FPS_CHECK(sp == nullptr);
+    } else if (sp == nullptr) {
+      resetStackPointer();
+    } else {
+      FPS_CHECK(stackbase <= sp && sp <= (char *) stackbase + stacksize);
+      stackptr = sp;
+    }
+  }
+};
+static_assert(sizeof(fps_t) == sizeof(void *) * 3, ""); // NHM-FIXME
+
+extern "C" __attribute__((visibility("default"))) thread_local fps_t *__fps_thd_stacks = nullptr;
 char *registered = nullptr;
 
 
 
+size_t getVecSize() {
+  return map_length / sizeof(fps_t);
+}
 
 
 class LiveThread {
 public:
   // NHM-TODO: MAke private?
-  void **&stackptrs;
-  void **&stackbases;
-  uintptr_t *&stacksizes;
+  fps_t *&stacks;
   const size_t default_stack_size;
   const size_t default_guard_size;
   // NHM-FIXME: Add a new array, name it "stackend" or "stacktop"
   LiveThread *next = nullptr;
 
   LiveThread(size_t default_stack_size, size_t default_guard_size):
-      stackptrs(__fps_thd_stackptrs),
-      stackbases(__fps_thd_stackbases),
-      stacksizes(__fps_thd_stacksizes),
+      stacks(__fps_thd_stacks),
       default_stack_size(default_stack_size),
       default_guard_size(default_guard_size)
   {
-    stackptrs = CreateNewMap<void *>();
-    stackbases = CreateNewMap<void *>();
-    stacksizes = CreateNewMap<uintptr_t>();
+    stacks = CreateNewMap<fps_t>();
   }
 
   LiveThread(const LiveThread &) = delete;
   LiveThread &operator=(const LiveThread&) = delete;
 
   void grow() {
-    growOne(stackptrs);
-    growOne(stackbases);
-    growOne(stacksizes);
+    // NHM-FIXME: No longer need this intermediate thing.
+    growOne(stacks);
   }
 
   void registerStack(size_t index) {
     FPS_CHECK(index < getVecSize());
-    FPS_CHECK(stackbases[index] == nullptr && stackptrs[index] == nullptr);
-#if 0
-    stacksizes[index] = default_stack_size + default_guard_size;
-#endif
+    FPS_CHECK(!stacks[index]);
   }
 
   void allocateStack(size_t index) {
     FPS_CHECK(index < getVecSize());
-    FPS_CHECK(stacksizes[index] == 0 && stackbases[index] == nullptr && stackptrs[index] == nullptr);
-    // NHM-FIXME: Could compute required guard for particular cpu model, based on ROB size.
-    void *stackbase = Mmap(nullptr, default_stack_size + default_guard_size,
-                           PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
-    Mprotect((char *) stackbase, default_guard_size, PROT_NONE);
-    stacksizes[index] = default_stack_size + default_guard_size;
-    stackbases[index] = stackbase;
-    stackptrs[index] = static_cast<char *>(stackbase) + default_stack_size + default_guard_size;
-    FPS_CHECK(stacksizes[index] > 0 && stackbases[index] != nullptr && stackptrs[index] != nullptr);
+    stacks[index].allocate(default_stack_size, default_guard_size);
   }
 
   void deallocateStack(size_t index) {
     FPS_CHECK(index < getVecSize());
-    if (stackbases[index])
-      safestack::Munmap(stackbases[index], stacksizes[index]);
-    stacksizes[index] = 0;
-    stackbases[index] = nullptr;
-    stackptrs[index] = nullptr;
+    if (stacks[index])
+      stacks[index].deallocate();
   }
 
 private:
-  static size_t CalculateMinSize(size_t num_stacks) {
-    return align_up<size_t>(max<size_t>(1, num_stacks * sizeof(void *)), getpagesize());
-  }
-
   template <typename T>
   static T *CreateNewMap() {
-    static_assert(sizeof(T) == sizeof(void *), "");
-    FPS_CHECK(map_length % sizeof(T) == 0);
     return (T *) Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
   }
 
-  template <typename T>
-  static void growOne(T *&map) {
+  template <typename T, typename... Ts>
+  static void growOne(T *&map, const Ts&... args) {
     void *old_map = map;
     void *new_map = Mremap(old_map, map_length, map_length * 2);
     if (new_map == MAP_FAILED) {
@@ -128,6 +161,10 @@ private:
       Mprotect(old_map, map_length, PROT_READ);
     }
     map = (T *) new_map;
+
+    for (size_t i = map_length / sizeof(T); i < map_length * 2 / sizeof(T); ++i) {
+      new (&map[i]) T(args...);
+    }
   }  
 };
 
@@ -142,18 +179,14 @@ public:
 
   // NHM-tODO: Make some of these private.
   const size_t length;
-  void ** const stackptrs;
-  void ** const stackbases;
-  uint64_t * const stacksizes;
+  fps_t * const stacks;
   const pid_t pid;
   const ThreadID tid;
   DeadThread *next = nullptr;
 
   explicit DeadThread(const LiveThread &live_thread):
       length(map_length),
-      stackptrs(live_thread.stackptrs),
-      stackbases(live_thread.stackbases),
-      stacksizes(live_thread.stacksizes),
+      stacks(live_thread.stacks),
       pid(getpid()),
       tid(safestack::GetTid())
   {
@@ -163,18 +196,14 @@ public:
     FPS_CHECK(!(pid == getpid() && tid == safestack::GetTid()));
 
     // Unmap stacks.
-    const size_t num_stacks = length / sizeof(uintptr_t);
+    const size_t num_stacks = length / sizeof(fps_t);
     for (size_t i = 0; i < num_stacks; ++i) {
-      if (stacksizes[i] == 0)
-        continue;
-      FPS_CHECK(stackbases[i]);
-      safestack::Munmap(stackbases[i], stacksizes[i]); // NHM-tODO CHECK RET
+      stacks[i].~fps_t();
     }
 
     // Unmap fields.
-    safestack::Munmap(stackptrs, length);
-    safestack::Munmap(stackbases, length);
-    safestack::Munmap(stacksizes, length);
+    if (safestack::Munmap(stacks, length) < 0)
+      FPS_CHECK(false);
   }
   
 private:
@@ -246,7 +275,7 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack(const 
   FPS_LOG("registering %s (%" PRIu64 ")", name, index);
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
     thread->registerStack(index);
-  return index * sizeof(void *); // NHM-FIXME
+  return index * sizeof(fps_t);
 }
 
 struct reginfo {
@@ -260,8 +289,9 @@ extern "C" __attribute__((visibility("default"))) void __fps_regstacks(uint64_t 
 
 extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index, const char *name) {
   Lock live_threads_lock(live_threads_mutex);
+
+  index /= sizeof(fps_t); // NHM-FIXME: This should be moved into FPS's generated constructor/destructor code, instead.
   
-  index /= sizeof(void *); // NHM-FIXME: This should be moved into FPS's generated constructor/destructor code, instead.
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
     thread->deallocateStack(index);
   FPS_LOG("deregistered %s (%" PRIu64 ")", name, index);
@@ -273,18 +303,11 @@ extern "C" __attribute__((visibility("default"))) void __fps_deregstacks(uint64_
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_allocstack(uint64_t index) {
-  index /= sizeof(void *);
+  index /= sizeof(fps_t);
   FPS_LOG("allocstack %" PRIu64, index);
-  FPS_CHECK(__fps_thd_stacksizes[index] == 0 &&
-            __fps_thd_stackptrs[index] == nullptr &&
-            __fps_thd_stackbases[index] == nullptr &&
-            "allocstack called twice!");
-
+  FPS_CHECK(!__fps_thd_stacks[index] && "allocstack called twice!");
   __fps_thread->allocateStack(index);
-  FPS_CHECK(__fps_thd_stacksizes[index] != 0 &&
-            __fps_thd_stackptrs[index] != nullptr &&
-            __fps_thd_stackbases[index] != nullptr &&
-            "allocstack failed!");
+  FPS_CHECK(__fps_thd_stacks[index] && "allocstack failed!");
 }
 
 // NHM-TODO: Will need to add thread specific info here, like stack size, etc.
@@ -420,7 +443,8 @@ extern "C" __attribute__((visibility("default"))) fps_ctx_t *__fps_ctx_push(fps_
   ctx->num_stackptrs = getVecSize();
   ctx->stackptrs = (void **) malloc(ctx->num_stackptrs * sizeof(void *));
   FPS_CHECK(ctx->stackptrs);
-  memcpy(ctx->stackptrs, __fps_thd_stackptrs, ctx->num_stackptrs * sizeof(void *));
+  for (size_t i = 0; i < ctx->num_stackptrs; ++i)
+    ctx->stackptrs[i] = __fps_thd_stacks[i].stackptr;
   ctx->next = nullptr;
 
   // Append to the stack.
@@ -449,13 +473,11 @@ extern "C" __attribute__((visibility("default"))) void __fps_ctx_restore(fps_ctx
   FPS_LOG("restoring context");
   FPS_CHECK(ctx);
   FPS_CHECK(ctx->num_stackptrs <= getVecSize());
-  memcpy(__fps_thd_stackptrs, ctx->stackptrs, ctx->num_stackptrs * sizeof(void *));
-
-  for (size_t i = 0; i < getVecSize(); ++i) {
-    if (__fps_thd_stackptrs[i] == nullptr && __fps_thd_stackbases[i] != nullptr) {
-      __fps_thd_stackptrs[i] = (char *) __fps_thd_stackbases[i] + __fps_thd_stacksizes[i];
-    }
-  }
+  size_t i;
+  for (i = 0; i < ctx->num_stackptrs; ++i)
+    __fps_thd_stacks[i].setStackPointer(ctx->stackptrs[i]);
+  for (; i < getVecSize(); ++i)
+    __fps_thd_stacks[i].resetStackPointer();
 
   // Erase rest of list (not including this context, since it might be re-used).
   for (fps_ctx_t *next = ctx->next; next; ) {
