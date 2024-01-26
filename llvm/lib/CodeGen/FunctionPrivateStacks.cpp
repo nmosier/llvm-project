@@ -60,6 +60,7 @@ bool FunctionPrivateStacks::run() {
   PtrTy = PointerType::getUnqual(Ctx);
     
   // Declare thread-local variable.
+  // NHM-FIXME: Not sure if these are necessary at this point.
   new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stackptrs");
   new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stackbases");
   new GlobalVariable(M, IntegerType::get(Ctx, 64), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stacksizes");

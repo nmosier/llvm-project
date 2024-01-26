@@ -22,6 +22,14 @@ using namespace llvm;
 
 namespace {
 
+cl::opt<bool> FPSParanoid(
+    PASS_KEY "-paranoid",
+    cl::desc("Perform additional checks to prevent unlikely attack scenarios. "
+             "Currently this flag only causes the insertion of bounds checks."),
+    cl::init(false),
+    cl::Hidden);
+    
+
 // NHM-FIXME: This must be implemented somewhere.
 // NHM-FIXME: use llvm::alignTo
 template <typename T>
@@ -184,6 +192,8 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   // ENTRY: real entry code now
   EntryMBB.addLiveIn(Regs[0]);
   EntryMBB.addLiveIn(Regs[1]);
+  EntryMBB.addLiveIn(X86::EFLAGS);
+  // BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::CMOV64rr), 
   BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::SUB64ri32), Regs[1])
       .addReg(Regs[1])
       .addImm(PrivateFrameSize);
@@ -670,146 +680,8 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   emitPrologue(MF, PrivateFrameSize);
   emitEpilogue(MF, PrivateFrameSize);
 
-  for (MachineInstr *MI : PrivateFrameAccesses) {
-    const int MemRefIdx = X86::getFirstAddrOperandIdx(*MI);
-    assert(MemRefIdx >= 0);
-    const MachineOperand &BaseMO = MI->getOperand(MemRefIdx + X86::AddrBaseReg);
-    assert(BaseMO.isReg());
-  }
-
-
-
-#if 0
-  // Reload at the target of EH_SjLj_Setup instructions.
-  SmallVector<MachineInstr *> EH_SjLj_Setups;
-  for (MachineBasicBlock &MBB : MF)
-    for (MachineInstr &MI : MBB)
-      if (MI.getOpcode() == X86::EH_SjLj_Setup)
-        EH_SjLj_Setups.push_back(&MI);
-  for (MachineInstr *MI : EH_SjLj_Setups) {
-    MachineBasicBlock &TgtMBB = *MI->getOperand(0).getMBB();
-    loadPrivateStackPointerAndBase(TgtMBB, TgtMBB.begin());
-  }
-#endif
 
   MF.verify();
-#if 0 
-  for (MachineBasicBlock &MBB : MF) {
-    for (MachineInstr &MI : MBB) {
-      if (MI.getOpcode() == X86::CMOV32rm) {
-        errs() << "TRACE: "; MI.dump();
-        exit(1);
-      }
-    }
-  }
-#endif
-
-
-  // NHM-FIXME: Check if it tracks liveness.
-
-  //   CMP rbx, &__fps_stackend
-  //   
-  //   MOV [__fps_stackptr], rbx
-  
-
-  // .fps.1:, 
-  //   MOV rbx, [__fps_stackptr]
-  //   SUB rbx, <frame-size>
-  //   MOV rbx, [__
-  
-
-  // BB1: 
-  //   MOV rbx, [__fps_stackptr]
-  //   CMP rbx, 0
-  //   JNZ BB3
-  // BB2: 
-  //   CALL __fps_alloc
-  //   MOV rbx, [__fps_stackptr]
-  // BB3:
-  //   SUB rbx, <frame-size>
-  //   ...
-
-#if 0
-  // First, let's try adding a new symbol.
-  MCContext& MCC = MF.getContext();
-  MCSymbol *StackPtrSym = MCC.getOrCreateSymbol("__fps_stackptr_" + MF.getName());
-  MCSection *DataSection = MCC.getObjectFileInfo()->getDataSection();
-  auto *Fragment = new MCDataFragment(DataSection);
-  Fragment->getContents().resize(8); // 8-byte stack pointer
-  StackPtrSym->setFragment(Fragment);
-  Fragment->setAtom(StackPtrSym);
-
-  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::MOV64rm), X86::RAX)
-      .addReg(X86::RIP)
-      .addImm(1)
-      .addReg(0)
-      .addSym(StackPtrSym)
-      .addReg(0);
-#endif
-
-#if 0
-  auto *StackPtrSym = M.getNamedValue(StringRef(("__fps_stackptr_" + MF.getName()).str()));
-
-  MachineBasicBlock &LoadMBB = *MF.CreateMachineBasicBlock();
-  MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
-  MF.push_front(&AllocMBB);
-  MF.push_front(&LoadMBB);
-  
-  auto LoadMBBI = LoadMBB.begin();
-  BuildMI(LoadMBB, LoadMBBI, DebugLoc(), TII->get(X86::MOV64rm), X86::RBX)
-      .addReg(X86::RIP)
-      .addImm(1)
-      .addReg(0)
-      .addGlobalAddress(StackPtrSym)
-      .addReg(0);
-  BuildMI(LoadMBB, LoadMBBI, DebugLoc(), TII->get(X86::CMP64ri8))
-      .addReg(X86::RBX)
-      .addImm(0);
-  TII->insertBranch(LoadMBB, &EntryMBB, &AllocMBB, {MachineOperand::CreateImm(X86::COND_NE)}, DebugLoc());
-  LoadMBB.addSuccessor(&AllocMBB);
-  LoadMBB.addSuccessor(&EntryMBB);
-  for (auto &LI : EntryMBB.liveins())
-    LoadMBB.addLiveIn(LI);
-
-  auto AllocMBBI = AllocMBB.begin();
-  const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
-  for (auto &LI : EntryMBB.liveins())
-    AllocMBB.addLiveIn(LI);
-  
-  // Save argument registers to shared stack.
-  struct ArgSpillInfo {
-    MCRegister Reg;
-    const TargetRegisterClass *RC;
-    int FI;
-  };
-  SmallVector<ArgSpillInfo> ArgSpillInfos;
-  for (auto &LI : AllocMBB.liveins()) {
-    ArgSpillInfo Info;
-    Info.Reg = LI.PhysReg;
-    Info.RC = TRI->getMinimalPhysRegClass(Info.Reg);
-    const auto SpillSize = TRI->getSpillSize(*Info.RC);
-    Info.FI = MFI.CreateSpillStackObject(SpillSize, Align(SpillSize)); // NHM-FIXME: Should get spill align
-    TII->storeRegToStackSlot(AllocMBB, AllocMBBI, Info.Reg, true, Info.FI, Info.RC, TRI, X86::NoRegister);
-    ArgSpillInfos.push_back(Info);
-  }
-
-  BuildMI(AllocMBB, AllocMBBI, DebugLoc(), TII->get(X86::CALL64pcrel32))
-      .addExternalSymbol("__fps_alloc")
-      .addRegMask(RegMask);
-  BuildMI(AllocMBB, AllocMBBI, DebugLoc(), TII->get(X86::MOV64rm), X86::RBX)
-      .addReg(X86::RIP)
-      .addImm(1)
-      .addReg(0)
-      .addGlobalAddress(StackPtrSym)
-      .addReg(0);
-
-  // Restore argument registers to shared stack.
-  for (const ArgSpillInfo &Info : ArgSpillInfos)
-    TII->loadRegFromStackSlot(AllocMBB, AllocMBBI, Info.Reg, Info.FI, Info.RC, TRI, X86::NoRegister);
-  TII->insertUnconditionalBranch(AllocMBB, &EntryMBB, DebugLoc());
-  AllocMBB.addSuccessor(&EntryMBB);
-#endif
-
 
   instrumentSetjmps(MF);
 

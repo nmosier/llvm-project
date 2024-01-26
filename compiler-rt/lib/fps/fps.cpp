@@ -292,9 +292,11 @@ void *thread_start(void *arg) {
   __fps_thread = new (malloc(sizeof(LiveThread))) LiveThread(info->stack_size, info->guard_size);
   __fps_thread->next = ref_thread;
   live_threads = __fps_thread;
+#if 0
   for (size_t i = 0; i < getVecSize(); ++i)
     if (ref_thread->stacksizes[i])
       __fps_thread->allocateStack(i);
+#endif
 
   pthread_setspecific(thread_cleanup_key, (void *) 1);
 
