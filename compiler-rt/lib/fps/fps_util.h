@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include "safestack/safestack_platform.h"
 
@@ -30,17 +31,23 @@
 
 #define FPS_LOGGING 0
 #if FPS_LOGGING
-# define FPS_LOG(...)                            \
-  do {                                          \
-    fprintf(stderr, "[fps] ");                  \
-    fprintf(stderr, __VA_ARGS__);               \
-    fprintf(stderr, "\n");                      \
+# define FPS_LOG(...)                                   \
+  do {                                                  \
+    pthread_mutex_lock(&log_mutex);                     \
+    fprintf(stderr, "[fps:%d] ", safestack::GetTid());  \
+    fprintf(stderr, __VA_ARGS__);                       \
+    fprintf(stderr, "\n");                              \
+    pthread_mutex_unlock(&log_mutex);                   \
   } while (false)
 #else
 # define FPS_LOG(...) do {} while (false)
 #endif
 
 inline void *operator new(size_t count, void *here) { return here; }
+
+#if FPS_LOGGING
+inline pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 namespace fps {
 
