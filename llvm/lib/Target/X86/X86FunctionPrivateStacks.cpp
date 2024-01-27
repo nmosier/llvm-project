@@ -155,7 +155,6 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   }
   EntryMBB.addLiveIn(Regs[0]);
   EntryMBB.addLiveIn(Regs[1]);
-  EntryMBB.addLiveIn(X86::EFLAGS);
   NewEntryMBB.addSuccessor(&CheckMBB);
 
   // CheckMBB:
@@ -210,12 +209,9 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   //  void *r1 = r1->stackptr;
   //  r1 = r1 - PrivateFrameSize;
   //  r0->stackptr = r1;
-  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::LEA64r), Regs[1])
+  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::SUB64ri32), Regs[1])
       .addReg(Regs[1])
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(-static_cast<int64_t>(PrivateFrameSize))
-      .addReg(X86::NoRegister);
+      .addImm(PrivateFrameSize);
   auto *DummyVar = MF.getFunction().getParent()->getNamedValue(("__fps_dummy_" + MF.getName()).str());
   assert(DummyVar);
   BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::CMOV64rm), Regs[1])
@@ -225,7 +221,25 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
       .addReg(X86::NoRegister)
       .addGlobalAddress(DummyVar)
       .addReg(X86::NoRegister)
-      .addImm(X86::COND_E);
+      .addImm(X86::COND_B); // If carry flag was set, then the input was zero, or we have a huge frame that jumped over the guard.
+  // Either way, the sae behavior is to load in the dummy value.
+  if (EnableOverflowChecks) {
+    BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::CMP64rm))
+        .addReg(Regs[1])
+        .addReg(Regs[0])
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(8) // NHM-FIXME: symbolize
+        .addReg(X86::NoRegister);
+    BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::CMOV64rm), Regs[1])
+        .addReg(Regs[1])
+        .addReg(X86::RIP)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addGlobalAddress(DummyVar)
+        .addReg(X86::NoRegister)
+        .addImm(X86::COND_B);
+  }
   BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::MOV64mr))
       .addReg(Regs[0])
       .addImm(1)
