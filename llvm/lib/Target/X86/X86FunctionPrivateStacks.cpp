@@ -154,6 +154,8 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
     NewEntryMBB.addLiveIn(LI);
   }
   EntryMBB.addLiveIn(Regs[0]);
+  EntryMBB.addLiveIn(Regs[1]);
+  EntryMBB.addLiveIn(X86::EFLAGS);
   NewEntryMBB.addSuccessor(&CheckMBB);
 
   // CheckMBB:
@@ -161,13 +163,15 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   //  if (r0->stackbase == 0)
   //    AllocMBB
   getPointerToFPSData(CheckMBB, CheckMBB.end(), Loc, ThdStacksSym, Regs[0]);
-  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::CMP64mi8))
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::MOV64rm), Regs[1])
       .addReg(Regs[0])
       .addImm(1)
       .addReg(X86::NoRegister)
-      .addImm(8) // NHM-FIXME: Symbolize
-      .addReg(X86::NoRegister)
-      .addImm(0);
+      .addImm(0) // NHM-FIXME: Symbolize
+      .addReg(X86::NoRegister);
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::OR64rr), Regs[1])
+      .addReg(Regs[1])
+      .addReg(Regs[1]);
   TII->insertBranch(CheckMBB, &AllocMBB, &EntryMBB, {MachineOperand::CreateImm(X86::COND_E)}, DebugLoc());
   CheckMBB.addSuccessor(&AllocMBB);
   CheckMBB.addSuccessor(&EntryMBB);
@@ -206,15 +210,22 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   //  void *r1 = r1->stackptr;
   //  r1 = r1 - PrivateFrameSize;
   //  r0->stackptr = r1;
-  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
-      .addReg(Regs[0])
+  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::LEA64r), Regs[1])
+      .addReg(Regs[1])
       .addImm(1)
       .addReg(X86::NoRegister)
-      .addImm(0) // NHM-FIXME:L Symbolize
+      .addImm(-static_cast<int64_t>(PrivateFrameSize))
       .addReg(X86::NoRegister);
-  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::SUB64ri32), Regs[1])
+  auto *DummyVar = MF.getFunction().getParent()->getNamedValue(("__fps_dummy_" + MF.getName()).str());
+  assert(DummyVar);
+  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::CMOV64rm), Regs[1])
       .addReg(Regs[1])
-      .addImm(PrivateFrameSize);
+      .addReg(X86::RIP)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addGlobalAddress(DummyVar)
+      .addReg(X86::NoRegister)
+      .addImm(X86::COND_E);
   BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::MOV64mr))
       .addReg(Regs[0])
       .addImm(1)

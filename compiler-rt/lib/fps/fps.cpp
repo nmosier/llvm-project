@@ -15,7 +15,7 @@ namespace fps {
 
 namespace {
 
-void *placeholder = (void *) 0xdeadbeef; // NHM-FIXME: add real placeholder
+void *placeholder = (void *) nullptr; // NHM-FIXME: add real placeholder
 
 using ThreadID = safestack::ThreadId;
 
@@ -464,7 +464,6 @@ extern "C" __attribute__((visibility("default"))) fps_ctx_t *__fps_ctx_push(fps_
   FPS_CHECK(ctx->stackptrs);
   for (size_t i = 0; i < ctx->num_stackptrs; ++i) {
     ctx->stackptrs[i] = __fps_thd_stacks[i].stackptr;
-    FPS_CHECK(ctx->stackptrs[i] != nullptr);
   }
   ctx->next = nullptr;
 
