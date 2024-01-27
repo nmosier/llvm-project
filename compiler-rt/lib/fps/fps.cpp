@@ -283,12 +283,19 @@ extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack(const 
 }
 
 struct reginfo {
-  uint64_t *index;
+  uint64_t &index;
   const char *name;
+  const uintptr_t &private_frame_size;
+  void *&dummy_frame;
 };
 extern "C" __attribute__((visibility("default"))) void __fps_regstacks(uint64_t n, const reginfo *vec) {
-  for (uint64_t i = 0; i < n; ++i)
-    *vec[i].index = __fps_regstack(vec[i].name);
+  for (uint64_t i = 0; i < n; ++i) {
+    auto &info = vec[i];
+    info.index = __fps_regstack(info.name);
+    FPS_CHECK(info.private_frame_size > 0);
+    info.dummy_frame = malloc(info.private_frame_size);
+    FPS_CHECK(info.dummy_frame);
+  }
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t index, const char *name) {
@@ -302,8 +309,14 @@ extern "C" __attribute__((visibility("default"))) void __fps_deregstack(uint64_t
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_deregstacks(uint64_t n, const reginfo *vec) {
-  for (uint64_t i = 0; i < n; ++i)
-    __fps_deregstack(*vec[i].index, vec[i].name);
+  for (uint64_t i = 0; i < n; ++i) {
+    auto &info = vec[i];
+    __fps_deregstack(info.index, info.name);
+    FPS_CHECK(info.dummy_frame);
+    free(info.dummy_frame);
+    info.dummy_frame = nullptr;
+    info.index = -1;
+  }
 }
 
 extern "C" __attribute__((visibility("default"))) void __fps_allocstack(uint64_t index) {
