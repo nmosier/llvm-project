@@ -292,7 +292,9 @@ extern "C" __attribute__((visibility("default"))) void __fps_regstacks(uint64_t 
   for (uint64_t i = 0; i < n; ++i) {
     auto &info = vec[i];
     info.index = __fps_regstack(info.name);
+#if 0
     FPS_CHECK(info.private_frame_size > 0);
+#endif
     info.dummy_frame = malloc(info.private_frame_size);
     FPS_CHECK(info.dummy_frame);
   }

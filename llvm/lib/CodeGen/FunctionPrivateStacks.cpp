@@ -43,7 +43,7 @@ void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &
   auto *StackIdxVar = new GlobalVariable(M, Int64Ty, /*isConstant*/false, GlobalVariable::InternalLinkage, Constant::getNullValue(Int64Ty) , "__fps_stackidx_" + F.getName());
   Constant *FnNameExpr = ConstantDataArray::getString(Ctx, F.getName(), true);
   Constant *FnName = new GlobalVariable(M, FnNameExpr->getType(), /*isConsatnt*/true, GlobalVariable::PrivateLinkage, FnNameExpr);
-  auto *FrameSize = new GlobalVariable(M, Int64Ty, /*isConstant*/true, GlobalVariable::InternalLinkage, ConstantInt::get(Int64Ty, 42) /* NHM-FIXME */, "__fps_framesize_" + F.getName());
+  auto *FrameSize = new GlobalVariable(M, Int64Ty, /*isConstant*/true, GlobalVariable::InternalLinkage, ConstantInt::get(Int64Ty, -1) /* NHM-FIXME */, "__fps_framesize_" + F.getName());
   auto *DummyFrame = new GlobalVariable(M, PtrTy, /*isConstant*/false, GlobalVariable::InternalLinkage, Constant::getNullValue(PtrTy), "__fps_dummy_" + F.getName());
   RegInfos.push_back(ConstantStruct::get(RegInfoTy, StackIdxVar, FnName, FrameSize, DummyFrame));
 

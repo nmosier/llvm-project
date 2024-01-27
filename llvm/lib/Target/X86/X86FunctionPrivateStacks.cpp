@@ -632,11 +632,12 @@ bool X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   if (!EnableFunctionPrivateStacks || MF.getName().starts_with("__fps_"))
-    return false;
-
+    return false;  
+  
   TM = &MF.getTarget();
 
-  const Module& M = *MF.getFunction().getParent();
+  const Function &F = MF.getFunction();
+  const Module &M = *F.getParent();
   
   // For now, simply verify that stack realignment is not required,
   // and that we only need a stack pointer, not a base pointer or frame pointer.
@@ -700,6 +701,9 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
   instrumentSetjmps(MF);
 
+  // Update register.
+  GlobalVariable *FrameSizeVar = cast<GlobalVariable>(M.getNamedValue(("__fps_framesize_" + F.getName()).str()));
+  FrameSizeVar->setInitializer(ConstantInt::get(IntegerType::get(M.getContext(), 64), PrivateFrameSize));
 
   return true;
 }
