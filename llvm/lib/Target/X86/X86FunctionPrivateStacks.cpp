@@ -34,7 +34,14 @@ cl::opt<bool> FPSParanoid(
              "Currently this flag only causes the insertion of bounds checks."),
     cl::init(false),
     cl::Hidden);
-    
+
+// NHM-FIXME: Move to more sane location.
+// NHM-FIXME: Make structs for these.
+constexpr int offsetof_fps_current_frame = 0; // offsetof(fps_t, current_frame)
+constexpr int offsetof_frame_prev = 0; // offsetof(frame_t, prev)
+constexpr int offsetof_frame_next = 8; // offsetof(frame_t, next)
+constexpr int offsetof_frame_data = 16; // offsetof(frame_t, data)
+
 
 // NHM-FIXME: This must be implemented somewhere.
 // NHM-FIXME: use llvm::alignTo
@@ -153,21 +160,60 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
     AllocMBB.addLiveIn(LI);
     NewEntryMBB.addLiveIn(LI);
   }
-  EntryMBB.addLiveIn(Regs[0]);
   NewEntryMBB.addSuccessor(&CheckMBB);
 
   // CheckMBB:
   //  fps_t *r0 <- get fps pointer
-  //  if (r0->stackbase == 0)
-  //    AllocMBB
+  //  frame_t *r1 = r0->current_frame;
+  //  frame_t *r1 = r1->next;
+  //  if (r1 == r1->next) {
+  //    __fps_morestack(index);
+  //    goto CheckMBB;
+  //  }
+  //  r0->current_frame = r1;
+  //  r1 = r1->data;
+  // NHM-FIXME: Can optimize out the r1->data by simply placing the data *before* the frame_t struct (like TLS storage)!
+  
+
+  // fps_t *r0 = ...;
   getPointerToFPSData(CheckMBB, CheckMBB.end(), Loc, ThdStacksSym, Regs[0]);
-  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::CMP64mi8))
+
+  // frame_t *r1 = r0->current_frame;
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::MOV64rm), Regs[1])
       .addReg(Regs[0])
       .addImm(1)
       .addReg(X86::NoRegister)
-      .addImm(24) // NHM-FIXME: Symbolize
+      .addImm(offsetof_fps_current_frame)
+      .addReg(X86::NoRegister);
+
+  // bool overflow = (r1 == r1->next);
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::CMP64rm))
+      .addReg(Regs[1])
+      .addReg(Regs[1])
+      .addImm(1)
       .addReg(X86::NoRegister)
-      .addImm(0);
+      .addImm(offsetof_frame_next)
+      .addReg(X86::NoRegister);
+
+  // r1 = r1->next;
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::MOV64rm), Regs[1])
+      .addReg(Regs[1])
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(offsetof_frame_next)
+      .addReg(X86::NoRegister);
+
+  // r0->current_frame = r1;
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::MOV64mr))
+      .addReg(Regs[0])
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(offsetof_fps_current_frame)
+      .addReg(X86::NoRegister)
+      .addReg(Regs[1]);
+
+  // NHM-FIXME: Rename AllocMBB to 'morestack'.
+  // if (overflow) goto AllocMBB;
   TII->insertBranch(CheckMBB, &AllocMBB, &EntryMBB, {MachineOperand::CreateImm(X86::COND_E)}, DebugLoc());
   CheckMBB.addSuccessor(&AllocMBB);
   CheckMBB.addSuccessor(&EntryMBB);
@@ -185,7 +231,7 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
       .addGlobalAddress(StackIdxSym)
       .addReg(0);
   BuildMI(AllocMBB, AllocMBB.end(), DebugLoc(), TII->get(X86::CALL64pcrel32))
-      .addExternalSymbol("__fps_allocstack")
+      .addExternalSymbol("__fps_morestack")
       .addRegMask(RegMask)
       .addUse(X86::RDI, RegState::ImplicitKill);
   MFI->setAdjustsStack(true);
@@ -202,6 +248,7 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   TII->insertUnconditionalBranch(AllocMBB, &CheckMBB, DebugLoc());  
   AllocMBB.addSuccessor(&CheckMBB);
 
+#if 0
   // EntryMBB:
   //  void *r1 = r1->stackptr;
   //  r1 = r1 - PrivateFrameSize;
@@ -252,11 +299,14 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
       .addImm(0)
       .addReg(X86::NoRegister)
       .addReg(Regs[1]);
+#endif
 }
 
 void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {
   if (PrivateFrameSize == 0)
     return;
+
+  DebugLoc Loc;
 
   for (MachineBasicBlock &MBB : MF) {
     if (MBB.empty() || !MBB.back().isReturn())
@@ -274,21 +324,28 @@ void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Privat
     assert(Regs.size() == 2);
     assert(!LPR.contains(X86::EFLAGS));
 
+    // fps_t *r0 = ...;
+    // frame_t *r1 = r0->current_frame;
+    // r1 = r1->prev;
+    // r0->current_frame = r1;
     getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Regs[0]);
-    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Regs[1])
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
         .addReg(Regs[0])
         .addImm(1)
         .addReg(X86::NoRegister)
-        .addImm(0)
+        .addImm(offsetof_fps_current_frame)
         .addReg(X86::NoRegister);
-    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::ADD64ri32), Regs[1])
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
         .addReg(Regs[1])
-        .addImm(PrivateFrameSize);
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(offsetof_frame_prev)
+        .addReg(X86::NoRegister);
     BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mr))
         .addReg(Regs[0])
         .addImm(1)
         .addReg(X86::NoRegister)
-        .addImm(0)
+        .addImm(offsetof_fps_current_frame)
         .addReg(X86::NoRegister)
         .addReg(Regs[1]);
   }
@@ -416,12 +473,23 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
             .addReg(X86::NoRegister)
             .addGlobalAddress(StackIdxSym)
             .addReg(X86::NoRegister);
+
+        // frame_t *frame = ???
         BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
             .addReg(ScratchReg)
             .addImm(1)
             .addReg(PSPReg)
             .addImm(0)
             .addReg(X86::NoRegister);
+
+        // void *psp = frame->data;
+        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
+            .addReg(PSPReg)
+            .addImm(1)
+            .addReg(X86::NoRegister)
+            .addImm(offsetof_frame_data)
+            .addReg(X86::NoRegister);
+        
 
         if (Spill) {
           // Restore scratch register.
@@ -469,6 +537,12 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, M
       .addImm(1)
       .addReg(X86::NoRegister)
       .addImm(0)
+      .addReg(X86::NoRegister);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
+      .addReg(Reg)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(offsetof_frame_data)
       .addReg(X86::NoRegister);
 }
 
@@ -677,9 +751,11 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   MFI = &MF.getFrameInfo();
 
   // NHM-FIXME: Make it an assert?
+#if 0
   if (TRI->hasBasePointer(MF))
     report_fatal_error("No function should have base pointer with FPS enabled!");
   assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
+#endif
 
   StackIdxSym = M.getNamedValue(("__fps_stackidx_" + MF.getName()).str());
   ThdStacksSym = M.getNamedValue("__fps_thd_stacks");
