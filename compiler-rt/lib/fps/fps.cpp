@@ -28,25 +28,73 @@ size_t map_length = 0;
 
 size_t getVecSize();
 
+struct frame_t;
+
+class frame_handle_t {
+  frame_t *end;
+public:
+  frame_handle_t(): end(nullptr) {}
+
+  operator bool() const {
+    return end != nullptr;
+  }
+
+  frame_t &operator*();
+  const frame_t &operator*() const;
+  frame_t *operator->();
+  const frame_t *operator->() const;
+  frame_handle_t &operator=(frame_t *frame);
+  operator frame_t*() const;
+
+  bool operator==(const frame_handle_t &o) const {
+    return end == o.end;
+  }
+};
+
 // NHM-FIXME: Class-ify this.
 struct frame_t {
-  frame_t *prev;
-  frame_t *next;
-  void *data;
+  frame_handle_t prev;
+  frame_handle_t next;
 };
+
+frame_t &frame_handle_t::operator*() {
+  return end[-1];
+}
+
+const frame_t &frame_handle_t::operator*() const {
+  return end[-1];
+}
+
+frame_t *frame_handle_t::operator->() {
+  return end - 1;
+}
+
+const frame_t *frame_handle_t::operator->() const {
+  return end - 1;
+}
+
+frame_handle_t &frame_handle_t::operator=(frame_t *frame) {
+  end = frame + 1;
+  return *this;
+}
+
+frame_handle_t::operator frame_t*() const {
+  return end - 1;
+}
+
 
 // NHM-FIXME: Make it illegal to copy this.
 struct fps_t {
-  frame_t *current_frame;
+  frame_handle_t current_frame;
   frame_t *top_frame;
   size_t private_frame_size;
 
-  fps_t(): current_frame(nullptr), private_frame_size(0) {}
+  fps_t(): top_frame(nullptr), private_frame_size(0) {}
 
   bool registered() const {
     FPS_CHECK((current_frame && top_frame && private_frame_size) ||
               (!current_frame && !top_frame && !private_frame_size));
-    return current_frame != nullptr;
+    return current_frame;
   }
 
   void Register(size_t private_frame_size) {
@@ -54,13 +102,12 @@ struct fps_t {
 
     this->private_frame_size = private_frame_size;
 
-    // NHM-fIXME: classify.
-    current_frame = (frame_t *) malloc(sizeof(frame_t));
+    // NHM-FIXME: classify.
+    // NHM-FIXME: Should zero-initialize.
+    current_frame = (frame_t *) malloc(sizeof(frame_t) + private_frame_size);
     FPS_CHECK(current_frame);
     current_frame->prev = current_frame;
     current_frame->next = current_frame;
-    current_frame->data = malloc(private_frame_size);
-    FPS_CHECK(current_frame->data);
 
     top_frame = current_frame;
   }
@@ -69,17 +116,14 @@ struct fps_t {
     // Free frame linked list.
     for (frame_t *it = current_frame->prev; it != it->prev; ) {
       frame_t *prev = it->prev;
-      free(it->data);
       free(it);
       it = prev;
     }
     for (frame_t *it = current_frame->next; it != it->next; ) {
       frame_t *next = it->next;
-      free(it->data);
       free(it);
       it = next;
     }
-    free(current_frame->data);
     free(current_frame);
 
     // Zero out variables to indicate deregistration.
@@ -110,13 +154,11 @@ struct fps_t {
   void MoreStack() {
     FPS_CHECK(current_frame->next == current_frame);
 
-    frame_t *new_frame = (frame_t *) malloc(sizeof(frame_t));
+    frame_t *new_frame = (frame_t *) malloc(private_frame_size + sizeof(frame_t));
     FPS_CHECK(new_frame);
     current_frame->next = new_frame;
     new_frame->prev = current_frame;
     new_frame->next = new_frame;
-    new_frame->data = malloc(private_frame_size);
-    FPS_CHECK(new_frame->data);
   }
 };
 
@@ -153,7 +195,6 @@ public:
   fps_t *&stacks;
   const size_t default_stack_size;
   const size_t default_guard_size;
-  // NHM-FIXME: Add a new array, name it "stackend" or "stacktop"
   LiveThread *next = nullptr;
 
   LiveThread(size_t default_stack_size, size_t default_guard_size):

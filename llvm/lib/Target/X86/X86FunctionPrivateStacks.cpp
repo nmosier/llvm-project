@@ -38,9 +38,8 @@ cl::opt<bool> FPSParanoid(
 // NHM-FIXME: Move to more sane location.
 // NHM-FIXME: Make structs for these.
 constexpr int offsetof_fps_current_frame = 0; // offsetof(fps_t, current_frame)
-constexpr int offsetof_frame_prev = 0; // offsetof(frame_t, prev)
-constexpr int offsetof_frame_next = 8; // offsetof(frame_t, next)
-constexpr int offsetof_frame_data = 16; // offsetof(frame_t, data)
+constexpr int offsetof_frame_prev = -16; // offsetof(frame_t, prev)
+constexpr int offsetof_frame_next = -8; // offsetof(frame_t, next)
 
 
 // NHM-FIXME: This must be implemented somewhere.
@@ -482,15 +481,6 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
             .addImm(0)
             .addReg(X86::NoRegister);
 
-        // void *psp = frame->data;
-        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
-            .addReg(PSPReg)
-            .addImm(1)
-            .addReg(X86::NoRegister)
-            .addImm(offsetof_frame_data)
-            .addReg(X86::NoRegister);
-        
-
         if (Spill) {
           // Restore scratch register.
           TII->loadRegFromStackSlot(MBB, MBBI, ScratchReg, SpillFI, &X86::GR64RegClass, TRI, X86::NoRegister);
@@ -537,12 +527,6 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, M
       .addImm(1)
       .addReg(X86::NoRegister)
       .addImm(0)
-      .addReg(X86::NoRegister);
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
-      .addReg(Reg)
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(offsetof_frame_data)
       .addReg(X86::NoRegister);
 }
 
