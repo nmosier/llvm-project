@@ -11,11 +11,15 @@
 
 // ===== PROJECTS ===== //
 // Resizeable, Pinned Stack Vectors: 
-// ???
+//  - use memfd_create? Well this doesn't play nicely with fork(). We'd need to instrument that.
+//  - two-level mapping should be enough.
 //
 // OPTIONS:
 //  - disable exception/longjmp support. This means that the program should never execute a longjmp that
-//    skips over a private stack frame. It looks like 
+//    skips over a private stack frame. It looks like
+//
+// FIXING GLOBAL ARRAYS:
+//  - we should actually make configs[] and stacks[] arrays that track their size. Maybe thru a global variable at first.
 
 // NHM-FIXME: Move somewhere more appropriate
 #define FPS_USE_MEMFDS SANITIZER_LINUX
@@ -38,9 +42,8 @@ void garbage_collect_threads(void);
 const unsigned kDefaultFPSSize = 0x2800000;
 
 // NHM-FIXME: MAke a static variable of Livethread?
-size_t map_length = 0;
-
-size_t getVecSize();
+constexpr size_t kMaxPrivateStacks = 0x100000;
+size_t gNumPrivateStacks = 0;
 
 struct frame_t;
 
@@ -100,7 +103,7 @@ frame_handle_t::operator frame_t*() const {
 // NHM-FIXME: Make it illegal to copy this.
 struct fps_t {
   frame_handle_t current_frame;
-  frame_t *top_frame;
+  frame_t *top_frame; // NHM-FIXME: Don't need this necessarily.
   size_t private_frame_size;
 
   fps_t(): top_frame(nullptr), private_frame_size(0) {}
@@ -200,11 +203,6 @@ struct shared_config_t {
 shared_config_t *configs = nullptr;
 
 
-size_t getVecSize() {
-  FPS_CHECK(static_cast<long>(map_length) != -1L);
-  return map_length / sizeof(fps_t);
-}
-
 // NHM-FIXME: REname to 'DeadStack' or something more appropritae if we don't re-use this.
 class DeadMap {
   void *base;
@@ -221,29 +219,18 @@ class LiveThread {
 public:
   // NHM-TODO: MAke private?
   fps_t *&stacks;
-  const size_t default_stack_size;
-  const size_t default_guard_size;
+  const size_t num_private_stacks;
   LiveThread *next = nullptr;
-#if FPS_USE_MEMFDS
-  ForwardList<DeadMap> dead_stacks;
-  int memfd;
-#endif
 
-  LiveThread(size_t default_stack_size, size_t default_guard_size):
-      stacks(__fps_thd_stacks),
-      default_stack_size(default_stack_size),
-      default_guard_size(default_guard_size)
+  LiveThread(size_t num_private_stacks): stacks(__fps_thd_stacks), num_private_stacks(num_private_stacks)
   {
-#if FPS_USE_MEMFDS
-    if ((memfd = memfd_create("fps", 0)) < 0)
-      FPS_CHECK(false && "memfd_create failed"); //  NHM-FIXME: Abort
-    if (ftruncate(memfd, map_length) < 0)
-      FPS_CHECK(false && "ftruncate failed"); // NHM-FIXME
-    stacks = (fps_t *) Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
-#else
-#error "Unsupported platform"
-#endif
-    for (size_t i = 0; i < map_length / sizeof(fps_t); ++i) {
+    // Allocate array of fps_t structs.
+    // NHM-FIXME: Check for unsigned overflow.
+    stacks = (fps_t *) Mmap(nullptr, num_private_stacks * sizeof(fps_t), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+
+    // Initialize array of fps_t structs.
+    // NHM-FIXME: Should just create pinned vector here.
+    for (size_t i = 0; i < num_private_stacks; ++i) {
       new (&stacks[i]) fps_t();
       if (configs[i].registered)
         stacks[i].Register(configs[i].private_frame_size);
@@ -259,13 +246,13 @@ public:
   }
 
   void registerStack(size_t index) {
-    FPS_CHECK(index < getVecSize());
+    FPS_CHECK(index < num_private_stacks);
     FPS_CHECK(configs[index].registered);
     stacks[index].Register(configs[index].private_frame_size);
   }
 
   void deregisterStack(size_t index) {
-    FPS_CHECK(index < getVecSize());
+    FPS_CHECK(index < gNumPrivateStacks);
     stacks[index].Deregister();
   }
 };
@@ -280,14 +267,14 @@ public:
   DeadThread &operator=(const DeadThread &) = delete;
 
   // NHM-tODO: Make some of these private.
-  const size_t length;
+  const size_t num_stacks;
   fps_t * const stacks;
   const pid_t pid;
   const ThreadID tid;
   DeadThread *next = nullptr;
 
   explicit DeadThread(const LiveThread &live_thread):
-      length(map_length),
+      num_stacks(live_thread.num_private_stacks),
       stacks(live_thread.stacks),
       pid(getpid()),
       tid(safestack::GetTid())
@@ -299,13 +286,12 @@ public:
     FPS_CHECK(!(pid == getpid() && tid == safestack::GetTid()));
 
     // Unmap stacks.
-    const size_t num_stacks = length / sizeof(fps_t);
     for (size_t i = 0; i < num_stacks; ++i)
       stacks[i].~fps_t();
 
     // Unmap fields.
-    if (safestack::Munmap(stacks, length) < 0)
-      FPS_CHECK(false);
+    if (safestack::Munmap(stacks, num_stacks * sizeof(fps_t)) < 0) // NHM-FIXME: Integer overflow.
+      FPS_CHECK(false); // NHM-FIXME
   }
   
 private:
@@ -325,12 +311,12 @@ __attribute__((constructor(0))) void init_main_thread() {
   if (live_threads)
     return;
 
-  map_length = 4096 * 4096; // NHM-FIXME: Add variable for override.
-
+  // NHM-FIXME: Add env variable for overriding number of private stacks.
+  
   // NHM-FIXME: Invert getVecSize() and map_length.
-  configs = (shared_config_t *) calloc(getVecSize(), sizeof(shared_config_t));
+  configs = (shared_config_t *) calloc(kMaxPrivateStacks, sizeof(shared_config_t));
   FPS_CHECK(configs);
-  for (size_t i = 0; i < getVecSize(); ++i)
+  for (size_t i = 0; i < kMaxPrivateStacks; ++i)
     new (&configs[i]) shared_config_t();
 
   size_t stack_size = kDefaultFPSSize;
@@ -339,7 +325,7 @@ __attribute__((constructor(0))) void init_main_thread() {
   if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY)
     stack_size = limit.rlim_cur;
   
-  __fps_thread = live_threads = new (malloc(sizeof(LiveThread))) LiveThread(stack_size, guard_size);
+  __fps_thread = live_threads = new (malloc(sizeof(LiveThread))) LiveThread(kMaxPrivateStacks);
 
   // Setup the thread cleanup handler.
   if (pthread_key_create(&thread_cleanup_key, thread_cleanup_handler) < 0)
@@ -351,48 +337,17 @@ __attribute__((constructor(0))) void init_main_thread() {
 // like 'claimUnusedIndex'
 size_t getUnusedIndex() {
   garbage_collect_threads();
-  size_t i;
-  for (i = 0; i < getVecSize(); ++i)
+  for (size_t i = 0; i < gNumPrivateStacks; ++i)
     if (!configs[i].registered)
       return i;
 
-  FPS_CHECK(false && "too many functions with private stacks! Increase the limit with [NHM-FIXME]");
-
-  FPS_LOG("growing maps %" PRIu64 " -> %" PRIu64, map_length, map_length * 2);
-  // NHM-FIXME: Set old length + new legnth and temporarily set map_length to -1 to catch bugs.
-
-  size_t old_length = map_length;
-  size_t new_length = map_length * 2;
-  size_t old_vec_size = getVecSize();
-  map_length = new_length;
-  size_t new_vec_size = getVecSize();
-  map_length = -1;
-
-  // NHM-FIXME: Or just use realloc() with trivially moveable array.
-  shared_config_t *new_configs = (shared_config_t *) calloc(new_vec_size, sizeof(shared_config_t));
-  FPS_CHECK(configs && new_configs);
-  {
-    size_t i;
-    for (i = 0; i < old_vec_size; ++i) {
-      new (&new_configs[i]) shared_config_t(static_cast<shared_config_t &&>(configs[i]));
-      configs[i].~shared_config_t();
-    }
-    for (; i < new_vec_size; ++i) {
-      new (&new_configs[i]) shared_config_t();
-    }
-    free(configs);
-    configs = new_configs;
+  if (gNumPrivateStacks < kMaxPrivateStacks) {
+    FPS_CHECK(!configs[gNumPrivateStacks].registered);
+    return gNumPrivateStacks++;
   }
 
-  for (LiveThread *thread = live_threads; thread; thread = thread->next)
-    thread->grow(old_length, new_length);
-  
-  map_length = new_length;
-  
-
-  FPS_CHECK(i < getVecSize());
-  FPS_CHECK(!configs[i].registered);
-  return i;
+  FPS_CHECK(false && "too many functions with private stacks! Increase the limit with [NHM-FIXME]");
+  abort();
 }
 
 // NHM-FIXME: private_{stack->frame}_size
@@ -464,7 +419,7 @@ void *thread_start(void *arg) {
   // Create a new thread.
   LiveThread *ref_thread = live_threads;
   FPS_CHECK(__fps_thread == nullptr);
-  __fps_thread = new (malloc(sizeof(LiveThread))) LiveThread(info->stack_size, info->guard_size);
+  __fps_thread = new (malloc(sizeof(LiveThread))) LiveThread(kMaxPrivateStacks);
   __fps_thread->next = ref_thread;
   live_threads = __fps_thread;
 #if 0
@@ -579,8 +534,8 @@ extern "C" __attribute__((visibility("default"))) fps_ctx_t *__fps_ctx_push(fps_
   // Calculate how much memory we need.
   ctx = (fps_ctx_t *) malloc(sizeof(fps_ctx_t));
   FPS_CHECK(ctx);
-  ctx->num_stackptrs = getVecSize();
-  ctx->stackptrs = (frame_t **) malloc(ctx->num_stackptrs * sizeof(frame_t *));
+  ctx->num_stackptrs = gNumPrivateStacks;
+  ctx->stackptrs = (frame_t **) malloc(ctx->num_stackptrs * sizeof(frame_t *)); // NHM-FIXME: Check for overflow.
   FPS_CHECK(ctx->stackptrs);
   for (size_t i = 0; i < ctx->num_stackptrs; ++i)
     ctx->stackptrs[i] = __fps_thd_stacks[i].current_frame;
@@ -611,11 +566,11 @@ extern "C" __attribute__((visibility("default"))) void __fps_ctx_pop(fps_ctx_t *
 extern "C" __attribute__((visibility("default"))) void __fps_ctx_restore(fps_ctx_t *ctx) {
   FPS_LOG("restoring context");
   FPS_CHECK(ctx);
-  FPS_CHECK(ctx->num_stackptrs <= getVecSize());
+  FPS_CHECK(ctx->num_stackptrs <= gNumPrivateStacks);
   size_t i;
   for (i = 0; i < ctx->num_stackptrs; ++i)
     __fps_thd_stacks[i].setCurrentFrame(ctx->stackptrs[i]);
-  for (; i < getVecSize(); ++i)
+  for (; i < gNumPrivateStacks; ++i)
     __fps_thd_stacks[i].resetToTopFrame();
 
   // Erase rest of list (not including this context, since it might be re-used).
