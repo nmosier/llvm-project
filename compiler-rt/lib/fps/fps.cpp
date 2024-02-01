@@ -7,8 +7,22 @@
 #include "safestack/safestack_util.h"
 #include "safestack/safestack_platform.h"
 #include "fps/fps_util.h"
+#include "fps/fps_ll.h"
+
+// ===== PROJECTS ===== //
+// Resizeable, Pinned Stack Vectors: 
+// ???
+//
+// OPTIONS:
+//  - disable exception/longjmp support. This means that the program should never execute a longjmp that
+//    skips over a private stack frame. It looks like 
+
+// NHM-FIXME: Move somewhere more appropriate
+#define FPS_USE_MEMFDS SANITIZER_LINUX
 
 // NHM-FIXME: Memory leak occurs when we resize arrays, methinks.
+
+using namespace __fps; // NHM-FIXME: Shouldn't need this later on.
 
 // NHM-FIXME: fps -> __fps.
 namespace fps {
@@ -163,6 +177,8 @@ struct fps_t {
 };
 
 extern "C" __attribute__((visibility("default"))) thread_local fps_t *__fps_thd_stacks = nullptr;
+
+
 struct shared_config_t {
   bool registered; // Whether this index has been registered.
   unsigned private_frame_size;
@@ -185,8 +201,20 @@ shared_config_t *configs = nullptr;
 
 
 size_t getVecSize() {
+  FPS_CHECK(static_cast<long>(map_length) != -1L);
   return map_length / sizeof(fps_t);
 }
+
+// NHM-FIXME: REname to 'DeadStack' or something more appropritae if we don't re-use this.
+class DeadMap {
+  void *base;
+  size_t len;
+public:
+  DeadMap(void *base, size_t len): base(base), len(len) {}
+  ~DeadMap() {
+    safestack::Munmap(base, len);
+  }
+};
 
 
 class LiveThread {
@@ -196,13 +224,25 @@ public:
   const size_t default_stack_size;
   const size_t default_guard_size;
   LiveThread *next = nullptr;
+#if FPS_USE_MEMFDS
+  ForwardList<DeadMap> dead_stacks;
+  int memfd;
+#endif
 
   LiveThread(size_t default_stack_size, size_t default_guard_size):
       stacks(__fps_thd_stacks),
       default_stack_size(default_stack_size),
       default_guard_size(default_guard_size)
   {
-    stacks = (fps_t *) Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+#if FPS_USE_MEMFDS
+    if ((memfd = memfd_create("fps", 0)) < 0)
+      FPS_CHECK(false && "memfd_create failed"); //  NHM-FIXME: Abort
+    if (ftruncate(memfd, map_length) < 0)
+      FPS_CHECK(false && "ftruncate failed"); // NHM-FIXME
+    stacks = (fps_t *) Mmap(nullptr, map_length, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
+#else
+#error "Unsupported platform"
+#endif
     for (size_t i = 0; i < map_length / sizeof(fps_t); ++i) {
       new (&stacks[i]) fps_t();
       if (configs[i].registered)
@@ -213,9 +253,9 @@ public:
   LiveThread(const LiveThread &) = delete;
   LiveThread &operator=(const LiveThread&) = delete;
 
-  void grow() {
-    // NHM-FIXME: No longer need this intermediate thing.
-    growOne(stacks);
+  // NHM-FIXME: Should accept new size as parameter.
+  void grow(size_t old_length, size_t new_length) {
+    FPS_CHECK(false && "Unsupported currently!");
   }
 
   void registerStack(size_t index) {
@@ -228,37 +268,6 @@ public:
     FPS_CHECK(index < getVecSize());
     stacks[index].Deregister();
   }
-
-private:
-  // NHM-FIXME: Inline.
-  template <typename T>
-  static void growOne(T *&map) {
-    size_t old_map_length = map_length;
-    T *old_map = map;
-    size_t new_map_length = map_length * 2; // NHM-FIXME: Gah!
-    T *new_map = (T *) Mremap(old_map, old_map_length, new_map_length);
-    if (new_map == MAP_FAILED) {
-      if (errno != ENOMEM) {
-        fprintf(stderr, "[fps] mremap failed: %s\n", strerror(errno));
-      }
-      new_map = (T *) Mmap(old_map, new_map_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
-
-      // NHM-FIXME: Figure out a way to do this.
-      // Munmap(map, map_length, map_length * 2);
-      // Mprotect(old_map, old_map_length, PROT_READ);
-    }
-
-    // NHM-FIXME: Make it easy and just create a new map always.
-    size_t i;
-    for (i = 0; i < old_map_length / sizeof(T); ++i)
-      if (new_map != old_map)
-        new (&new_map[i]) T(old_map[i]); // NHM-FIXME: Should use std::move or something.
-    for (; i < new_map_length / sizeof(T); ++i)
-      new (&new_map[i]) T();
-    
-    
-    map = new_map;
-  }  
 };
 
 
@@ -283,6 +292,7 @@ public:
       pid(getpid()),
       tid(safestack::GetTid())
   {
+    live_thread.stacks = nullptr;
   }
 
   ~DeadThread() {
@@ -315,7 +325,7 @@ __attribute__((constructor(0))) void init_main_thread() {
   if (live_threads)
     return;
 
-  map_length = getpagesize(); // NHM-FIXME: Maybe hard-code it instead?
+  map_length = 4096 * 4096; // NHM-FIXME: Add variable for override.
 
   // NHM-FIXME: Invert getVecSize() and map_length.
   configs = (shared_config_t *) calloc(getVecSize(), sizeof(shared_config_t));
@@ -346,13 +356,20 @@ size_t getUnusedIndex() {
     if (!configs[i].registered)
       return i;
 
+  FPS_CHECK(false && "too many functions with private stacks! Increase the limit with [NHM-FIXME]");
+
   FPS_LOG("growing maps %" PRIu64 " -> %" PRIu64, map_length, map_length * 2);
-  for (LiveThread *thread = live_threads; thread; thread = thread->next)
-    thread->grow();
+  // NHM-FIXME: Set old length + new legnth and temporarily set map_length to -1 to catch bugs.
+
+  size_t old_length = map_length;
+  size_t new_length = map_length * 2;
   size_t old_vec_size = getVecSize();
-  map_length *= 2;
-  // NHM-FIXME: Need to do resizeable array template.
-  shared_config_t *new_configs = (shared_config_t *) calloc(getVecSize(), sizeof(shared_config_t));
+  map_length = new_length;
+  size_t new_vec_size = getVecSize();
+  map_length = -1;
+
+  // NHM-FIXME: Or just use realloc() with trivially moveable array.
+  shared_config_t *new_configs = (shared_config_t *) calloc(new_vec_size, sizeof(shared_config_t));
   FPS_CHECK(configs && new_configs);
   {
     size_t i;
@@ -360,12 +377,18 @@ size_t getUnusedIndex() {
       new (&new_configs[i]) shared_config_t(static_cast<shared_config_t &&>(configs[i]));
       configs[i].~shared_config_t();
     }
-    for (; i < getVecSize(); ++i) {
+    for (; i < new_vec_size; ++i) {
       new (&new_configs[i]) shared_config_t();
     }
     free(configs);
     configs = new_configs;
   }
+
+  for (LiveThread *thread = live_threads; thread; thread = thread->next)
+    thread->grow(old_length, new_length);
+  
+  map_length = new_length;
+  
 
   FPS_CHECK(i < getVecSize());
   FPS_CHECK(!configs[i].registered);
@@ -390,7 +413,6 @@ struct reginfo {
   uint64_t &index;
   const char *name;
   const uintptr_t &private_frame_size;
-  void *&dummy_frame; // NHM-TODO: remove.
 };
 extern "C" __attribute__((visibility("default"))) void __fps_regstacks(uint64_t n, const reginfo *vec) {
   for (uint64_t i = 0; i < n; ++i) {

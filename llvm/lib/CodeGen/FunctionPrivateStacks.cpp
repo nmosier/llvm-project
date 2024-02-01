@@ -44,17 +44,7 @@ void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &
   Constant *FnNameExpr = ConstantDataArray::getString(Ctx, F.getName(), true);
   Constant *FnName = new GlobalVariable(M, FnNameExpr->getType(), /*isConsatnt*/true, GlobalVariable::PrivateLinkage, FnNameExpr);
   auto *FrameSize = new GlobalVariable(M, Int64Ty, /*isConstant*/true, GlobalVariable::InternalLinkage, ConstantInt::get(Int64Ty, -1) /* NHM-FIXME */, "__fps_framesize_" + F.getName());
-  auto *DummyFrame = new GlobalVariable(M, PtrTy, /*isConstant*/false, GlobalVariable::InternalLinkage, Constant::getNullValue(PtrTy), "__fps_dummy_" + F.getName());
-  RegInfos.push_back(ConstantStruct::get(RegInfoTy, StackIdxVar, FnName, FrameSize, DummyFrame));
-
-#if 0
-  // Register stack.
-  Value *StackIdx = CtorIRB.CreateCall(RegStack, {FnName});
-  CtorIRB.CreateStore(StackIdx, StackIdxVar);
-
-  // Deregister stack.
-  DtorIRB.CreateCall(DeregStack, {DtorIRB.CreateLoad(Int64Ty, StackIdxVar), FnName});
-#endif
+  RegInfos.push_back(ConstantStruct::get(RegInfoTy, StackIdxVar, FnName, FrameSize));
 }
 
 bool FunctionPrivateStacks::run() {
@@ -65,8 +55,7 @@ bool FunctionPrivateStacks::run() {
   //   uintptr_t *index;
   //   const char *name;
   //   const uintptr_t *private_frame_size;
-  //   const void **dummy_frame;
-  RegInfoTy = StructType::get(PtrTy, PtrTy, PtrTy, PtrTy);
+  RegInfoTy = StructType::get(PtrTy, PtrTy, PtrTy);
 
   // Declare thread-local variable.
   // NHM-FIXME: Not sure if these are necessary at this point.
