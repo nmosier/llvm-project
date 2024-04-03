@@ -104,6 +104,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeX86Target() {
   initializeX86ArgumentStackSlotPassPass(PR);
   initializeX86ReturnIndirectionPassPass(PR);
   initializeX86ControlFlowIndirectionPassPass(PR);
+  initializeX86ControlFlowIndirectionPass2Pass(PR);
 }
 
 static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
@@ -570,6 +571,7 @@ void X86PassConfig::addPreEmitPass() {
     addPass(createBreakFalseDeps());
   }
 
+  addPass(createX86ControlFlowIndirectionPass2());
   addPass(createX86IndirectBranchTrackingPass());
 
   addPass(createX86IssueVZeroUpperPass());

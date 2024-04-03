@@ -1944,6 +1944,9 @@ void X86MCCodeEmitter::encodeInstruction(const MCInst &MI,
     abort();
   }
 #endif
+
+  if (MI.getOpcode() == X86::JMP64r || MI.getOpcode() == X86::JMP64m)
+    emitByte(0xCC, CB);
 }
 
 MCCodeEmitter *llvm::createX86MCCodeEmitter(const MCInstrInfo &MCII,

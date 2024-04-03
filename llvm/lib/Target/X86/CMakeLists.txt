@@ -84,6 +84,7 @@ set(sources
   X86WinEHState.cpp
   X86InsertWait.cpp
   X86ControlFlowIndirection.cpp
+  X86ControlFlowIndirection2.cpp
   X86ReturnIndirection.cpp
   GISel/X86CallLowering.cpp
   GISel/X86InstructionSelector.cpp

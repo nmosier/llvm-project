@@ -167,6 +167,7 @@ FunctionPass *createX86SpeculativeLoadHardeningPass();
 FunctionPass *createX86SpeculativeExecutionSideEffectSuppression();
 FunctionPass *createX86ArgumentStackSlotPass();
 FunctionPass *createX86ControlFlowIndirectionPass();
+FunctionPass *createX86ControlFlowIndirectionPass2();
 FunctionPass *createX86ReturnIndirectionPass();
 
 void initializeCompressEVEXPassPass(PassRegistry &);
@@ -202,6 +203,7 @@ void initializeX86SpeculativeExecutionSideEffectSuppressionPass(PassRegistry &);
 void initializeX86SpeculativeLoadHardeningPassPass(PassRegistry &);
 void initializeX86TileConfigPass(PassRegistry &);
 void initializeX86ControlFlowIndirectionPassPass(PassRegistry &);
+void initializeX86ControlFlowIndirectionPass2Pass(PassRegistry &);
 void initializeX86ReturnIndirectionPassPass(PassRegistry &);
 
 namespace X86AS {

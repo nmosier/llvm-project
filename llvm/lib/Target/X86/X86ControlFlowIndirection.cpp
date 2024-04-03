@@ -10,7 +10,7 @@ using namespace llvm;
 
 namespace {
 
-class X86ControlFlowIndirectionPass : public MachineFunctionPass {
+class X86ControlFlowIndirectionPass final : public MachineFunctionPass {
 public:
   X86ControlFlowIndirectionPass() : MachineFunctionPass(ID) {}
   static char ID;
@@ -23,8 +23,6 @@ private:
   const TargetInstrInfo *TII;
   
   void handleConditional(MachineBasicBlock &MBB);
-  void handleIndirect(MachineBasicBlock &MBB);
-  void handleReturn(MachineBasicBlock &MBB);
 };
 
 }
@@ -35,71 +33,30 @@ bool X86ControlFlowIndirectionPass::runOnMachineFunction(MachineFunction &MF) {
   LLVM_DEBUG(dbgs() << "***** " << getPassName() << " : " << MF.getName() << " *****\n");
   TII = MF.getSubtarget().getInstrInfo();
 
-#if 0
-  // First, split multiple JCCs into saeparate blocks.
-  for (MachineBasicBlock &MBB : llvm::make_early_inc_range(MF)) {
-    auto Terminators = MBB.terminators();
-    const auto NumTerminators = std::distance(Terminators.begin(), Terminators.end());
-    if (NumTerminators < 2)
-      continue;
-
-    MachineInstr *T1 = &*Terminators.begin();
-    MachineInstr *T2 = &*std::next(Terminators.begin());
-  }
-#endif
+  bool Changed = false;
 
   for (MachineBasicBlock &MBB : MF) {
-    // There are three types of terminator groups.
-    // 1. A non-zero chain of JCCs optionally followed by a JMP.
-    // 2. A RET.
-    // 3. An indirect jump.
-    // 4. No terminators or a single unconditional jump.
-
-    bool HasJCC = false;
-    bool HasRet = false;
-    bool HasInd = false;
-
-    for (const MachineInstr &MI : MBB.terminators()) {
-      assert(MI.isTerminator());
-      if (MI.isConditionalBranch())
-        HasJCC = true;
-      else if (MI.isReturn())
-        HasRet = true;
-      else if (MI.isIndirectBranch())
-        HasInd = true;
-      else
-        assert(MI.isUnconditionalBranch());
-    }
-
-    if (HasJCC) {
-      assert(!HasRet && !HasInd);
+    if (llvm::any_of(MBB.terminators(), [] (const MachineInstr &MI) {
+      return MI.isConditionalBranch();
+    })) {
       handleConditional(MBB);
-    } else if (HasRet) {
-      assert(!HasInd);
-      handleReturn(MBB);
-    } else if (HasInd) {
-      handleIndirect(MBB);
+      Changed = true;
     }
-  }
 
-#if 0
-  for (MachineBasicBlock &MBB : MF) {
-    for (MachineInstr &MI : llvm::make_early_inc_range(MBB)) {
-      if (!MI.isTerminator())
-        continue;
-      
+    for (MachineInstr &MI : MBB) {
+      if (MI.isCall() && !MI.isReturn()) {
+        assert(!MI.isTerminator());
+        BuildMI(MBB, std::next(MI.getIterator()), DebugLoc(), TII->get(X86::LFENCE));
+      }
     }
   }
-#endif
 
   MF.verify();
 
-  return true;
+  return Changed;
 }
 
 void X86ControlFlowIndirectionPass::handleConditional(MachineBasicBlock &MBB) {
-  LLVM_DEBUG(dbgs() << "[condbr -> indbr] before: " << MBB);
-
   struct CondBrInfo {
     int Cond; // one of X86::COND_*
     MachineBasicBlock *Target;
@@ -114,8 +71,6 @@ void X86ControlFlowIndirectionPass::handleConditional(MachineBasicBlock &MBB) {
       return;
     }
       
-    if (MI.getOpcode() != X86::JCC_1)
-      errs() << MI;
     assert(MI.getOpcode() == X86::JCC_1);
     CondBrInfo CBI;
     CBI.Cond = MI.getOperand(1).getImm();
@@ -161,6 +116,7 @@ void X86ControlFlowIndirectionPass::handleConditional(MachineBasicBlock &MBB) {
         .addImm(CBI.Cond);
     Reg = CMovReg;
   }
+  // BuildMI(MBB, MBBI, Loc, TII->get(X86::LFENCE)); // NHM-FIXME: don't fence this?
   BuildMI(MBB, MBBI, Loc, TII->get(X86::JMP64r))
       .addReg(Reg);
 
@@ -172,11 +128,6 @@ void X86ControlFlowIndirectionPass::handleConditional(MachineBasicBlock &MBB) {
 
   LLVM_DEBUG(dbgs() << "[condbr -> indbr] after: " << MBB);
 }
-
-void X86ControlFlowIndirectionPass::handleIndirect(MachineBasicBlock &MBB) {}
-
-// NHM-FIXME: We can't do this here anyway.
-void X86ControlFlowIndirectionPass::handleReturn(MachineBasicBlock &MBB) {}
 
 INITIALIZE_PASS(X86ControlFlowIndirectionPass, PASS_KEY, "X86 control-flow indirection pass", false, false)
 FunctionPass *llvm::createX86ControlFlowIndirectionPass() {
