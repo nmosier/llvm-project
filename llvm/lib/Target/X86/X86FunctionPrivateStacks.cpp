@@ -493,9 +493,15 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
               .addImm(0);
           BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::LFENCE));
         }
-        
+
       } else {
-        loadPrivateStackPointer(MBB, FirstUseIt, PSPReg);
+          getPointerToFPSData(MBB, FirstUseIt, DebugLoc(), ThdStacksSym, PSPReg);
+          BuildMI(MBB, FirstUseIt, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
+              .addReg(PSPReg)
+              .addImm(1)
+              .addReg(X86::NoRegister)
+              .addImm(0)
+              .addReg(X86::NoRegister);
       }
 
       // Fixup uses with PSP reg.
@@ -520,14 +526,10 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
   }
 }
 
-void X86FunctionPrivateStacks::loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc) {
-  getPointerToFPSData(MBB, MBBI, Loc, ThdStacksSym, Reg);
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
-      .addReg(Reg)
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(0)
-      .addReg(X86::NoRegister);
+void X86FunctionPrivateStacks::loadPrivateStackPointer(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
+    const DebugLoc &Loc) {
+      
 }
 
 
