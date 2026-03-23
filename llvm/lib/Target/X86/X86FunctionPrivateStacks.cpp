@@ -66,14 +66,31 @@ private:
   const TargetInstrInfo *TII;
   const X86RegisterInfo *TRI;
   MachineFrameInfo *MFI;
-  const GlobalValue *StackIdxSym;
-  const GlobalValue *ThdStacksSym;
+  GlobalVariable *FPSSym;
+  const GlobalVariable *StackIdxSym;
+  const GlobalVariable *ThdStacksSym;
+  GlobalVariable *FrameSizeSym;
 
   // NHM-FIXME: No longer need pointer to member.
   void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalValue *Member, Register Reg);
 
   // NOTE: Permits PtrReg == ValReg.
-  void loadPrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
+  void loadPrivateStackPointer(MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI, Register Reg,
+                               const DebugLoc &Loc = DebugLoc());
+  void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
+                                   MachineBasicBlock::iterator MBBI,
+                                   Register Reg,
+                                   bool LiveEFLAGS,
+                                   LivePhysRegs &LPR,
+                                   const DebugLoc &Loc = DebugLoc());
+  void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
+                                   MachineBasicBlock::iterator MBBI,
+                                   Register Reg,
+                                   bool LiveEFLAGS,
+                                   LivePhysRegs &LPR,
+                                   const DebugLoc &Loc = DebugLoc());
+
 
   // NOTE: Does not permit PtrReg == ValReg.
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
@@ -88,7 +105,6 @@ private:
   void emitRegStack(MachineFunction &MF);
   void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
   void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);
-
 };
 
 static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
@@ -406,6 +422,10 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
 
       assert(PSPReg != X86::NoRegister);
 
+      // NHM-FIXME: The emergency stack slot should be in TLS, rather than on
+      // the stack. We can get away with only one global spill slot per thread!
+      // Could also do per-function if necessary.
+      // 
       // Zero out emergency stack slot, if necessary.
       if (std::next(PreScavengeIt) != PostScavengeIt) {
         BuildMI(MBB, PostScavengeIt, DebugLoc(), TII->get(X86::MOV64mi32))
@@ -419,90 +439,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
       }
 
       // Load private stack pointer.
-      LivePhysRegs LPR(*TRI);
-      LPR.addLiveOuts(MBB);
-      for (MachineInstr &MI : reverse(MBB)) {
-        LPR.stepBackward(MI);
-        if (MI.getIterator() == FirstUseIt)
-          break;
-      }
-      assert(LPR.available(MRI, PSPReg));
-      const bool LiveEFLAGS = LPR.contains(X86::EFLAGS);
-
-      if (LiveEFLAGS) {
-        MCPhysReg ScratchReg = getFreeReg(LPR, MRI, /*IgnoreRegs*/{PSPReg});
-        bool Spill = (ScratchReg == X86::NoRegister);
-        int SpillFI = -1;
-        auto MBBI = FirstUseIt;
-        if (Spill) {
-          // Evict a spillable register.
-          for (const MachineOperand &MO : FirstUseIt->operands())
-            if (MO.isReg() && MO.isUse() && MO.getReg())
-              LPR.removeReg(MO.getReg());
-          ScratchReg = getSpillableReg(LPR, TRI, MRI);
-          if (!ScratchReg)
-            report_fatal_error("Failed to get spillable register for live EFLAGS!");
-
-          SpillFI = MFI.CreateSpillStackObject(8, Align(8));
-
-          // Insert spill to stack.
-          TII->storeRegToStackSlot(MBB, MBBI, ScratchReg, /*isKill*/true, SpillFI, &X86::GR64RegClass, TRI, X86::NoRegister);
-        }
-
-        // Emit PSP reload code.
-        // MOV r1, [rip+gottpoff(__fps_thd_stackptrs@gottpoff)]
-        // MOV r1, fs:[r1]
-        // MOV r2, [rip+__stackidx_<fn>]
-        DebugLoc Loc;
-        BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
-            .addReg(X86::RIP)
-            .addImm(1)
-            .addReg(X86::NoRegister)
-            .addGlobalAddress(ThdStacksSym, 0, X86II::MO_GOTTPOFF)
-            .addReg(X86::NoRegister);
-        BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
-            .addReg(ScratchReg)
-            .addImm(1)
-            .addReg(X86::NoRegister)
-            .addImm(0)
-            .addReg(X86::FS);
-        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
-            .addReg(X86::RIP)
-            .addImm(1)
-            .addReg(X86::NoRegister)
-            .addGlobalAddress(StackIdxSym)
-            .addReg(X86::NoRegister);
-
-        // frame_t *frame = ???
-        BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
-            .addReg(ScratchReg)
-            .addImm(1)
-            .addReg(PSPReg)
-            .addImm(0)
-            .addReg(X86::NoRegister);
-
-        if (Spill) {
-          // Restore scratch register.
-          TII->loadRegFromStackSlot(MBB, MBBI, ScratchReg, SpillFI, &X86::GR64RegClass, TRI, X86::NoRegister);
-          BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mi32))
-              .addFrameIndex(SpillFI)
-              .addImm(1)
-              .addReg(X86::NoRegister)
-              .addImm(0)
-              .addReg(X86::NoRegister)
-              .addImm(0);
-          BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::LFENCE));
-        }
-
-      } else {
-          getPointerToFPSData(MBB, FirstUseIt, DebugLoc(), ThdStacksSym, PSPReg);
-          BuildMI(MBB, FirstUseIt, DebugLoc(), TII->get(X86::MOV64rm), PSPReg)
-              .addReg(PSPReg)
-              .addImm(1)
-              .addReg(X86::NoRegister)
-              .addImm(0)
-              .addReg(X86::NoRegister);
-      }
+      loadPrivateStackPointer(MBB, FirstUseIt, PSPReg, DebugLoc());
 
       // Fixup uses with PSP reg.
       for (auto MBBI = FirstUseIt; MBBI != PostScavengeIt; ++MBBI) {
@@ -526,12 +463,145 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
   }
 }
 
+void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
+    bool LiveEFLAGS, LivePhysRegs &LPR, const DebugLoc &Loc) {
+
+  assert(!LiveEFLAGS && "Live EFLAGS not handled yet");
+
+  // Emit PSP reload code.
+  // MOV r1, [rip+gottpoff(__fps_stackframe_<fn>@gottpoff)]
+  // ADD r1, fs:[0] <-- This works because fs:[0] == fs.
+  // In effect, it does LEA r1, fs:[r1] (if doing do didn't actually ignore FS entirely).
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
+      .addReg(X86::RIP)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addGlobalAddress(FPSSym, 0, X86II::MO_GOTTPOFF)
+      .addReg(X86::NoRegister);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::ADD64rm), Reg)
+      .addReg(Reg)
+      .addReg(X86::NoRegister)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::FS);
+}
+
+void X86FunctionPrivateStacks::loadPrivateStackPointerFull(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
+    bool LiveEFLAGS, LivePhysRegs &LPR, const DebugLoc &Loc) {
+
+  auto &MF = *MBB.getParent();
+  auto &MRI = MF.getRegInfo();
+  auto &MFI = MF.getFrameInfo();
+
+  if (LiveEFLAGS) {
+    MCPhysReg ScratchReg = getFreeReg(LPR, MRI, /*IgnoreRegs*/ {Reg});
+    bool Spill = (ScratchReg == X86::NoRegister);
+    int SpillFI = -1;
+    if (Spill) {
+      // Evict a spillable register.
+      // NHM-FIXME: Why is it ok that we are spilling the register here?
+      for (const MachineOperand &MO : MBBI->operands())
+        if (MO.isReg() && MO.isUse() && MO.getReg())
+          LPR.removeReg(MO.getReg());
+      ScratchReg = getSpillableReg(LPR, TRI, MRI);
+      if (!ScratchReg)
+        report_fatal_error("Failed to get spillable register for live EFLAGS!");
+
+      SpillFI = MFI.CreateSpillStackObject(8, Align(8));
+
+      // Insert spill to stack.
+      TII->storeRegToStackSlot(MBB, MBBI, ScratchReg, /*isKill*/ true, SpillFI,
+                               &X86::GR64RegClass, TRI, X86::NoRegister);
+    }
+
+    // Emit PSP reload code.
+    // MOV r1, [rip+gottpoff(__fps_thd_stackptrs@gottpoff)]
+    // MOV r1, fs:[r1]
+    // MOV r2, [rip+__stackidx_<fn>]
+    DebugLoc Loc;
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
+        .addReg(X86::RIP)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addGlobalAddress(ThdStacksSym, 0, X86II::MO_GOTTPOFF)
+        .addReg(X86::NoRegister);
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
+        .addReg(ScratchReg)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::FS);
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Reg)
+        .addReg(X86::RIP)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addGlobalAddress(StackIdxSym)
+        .addReg(X86::NoRegister);
+
+    // frame_t *frame = ???
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Reg)
+        .addReg(ScratchReg)
+        .addImm(1)
+        .addReg(Reg)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+
+    if (Spill) {
+      // Restore scratch register.
+      TII->loadRegFromStackSlot(MBB, MBBI, ScratchReg, SpillFI,
+                                &X86::GR64RegClass, TRI, X86::NoRegister);
+      BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mi32))
+          .addFrameIndex(SpillFI)
+          .addImm(1)
+          .addReg(X86::NoRegister)
+          .addImm(0)
+          .addReg(X86::NoRegister)
+          .addImm(0);
+      BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::LFENCE));
+    }
+
+  } else {
+    getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Reg);
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Reg)
+        .addReg(Reg)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+  }
+}
+
 void X86FunctionPrivateStacks::loadPrivateStackPointer(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
     const DebugLoc &Loc) {
-      
-}
+  const MachineFunction &MF = *MBB.getParent();
+  const Function &F = MF.getFunction();
+  auto &MRI = MF.getRegInfo();
 
+  LivePhysRegs LPR(*TRI);
+  LPR.addLiveOuts(MBB);
+  for (MachineInstr &MI : reverse(MBB)) {
+    LPR.stepBackward(MI);
+    if (MI.getIterator() == MBBI)
+      break;
+  }
+  assert(LPR.available(MRI, Reg));
+  const bool LiveEFLAGS = LPR.contains(X86::EFLAGS);
+  
+  switch (F.fpsKind()) {
+  case Function::FullFPS:
+    loadPrivateStackPointerFull(MBB, MBBI, Reg, LiveEFLAGS, LPR, Loc);
+    break;
+  case Function::LeafFPS:
+    loadPrivateStackPointerLeaf(MBB, MBBI, Reg, LiveEFLAGS, LPR, Loc);
+    break;
+  default:
+    report_fatal_error("unhandled FPS type");
+  }
+}
 
 bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
   for (MachineBasicBlock &MBB : MF) {
@@ -726,8 +796,9 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   
   TM = &MF.getTarget();
 
-  const Function &F = MF.getFunction();
-  const Module &M = *F.getParent();
+  Function &F = MF.getFunction();
+  Module &M = *F.getParent();
+  LLVMContext &Ctx = M.getContext();
   
   // For now, simply verify that stack realignment is not required,
   // and that we only need a stack pointer, not a base pointer or frame pointer.
@@ -743,10 +814,21 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
 #endif
 
-  StackIdxSym = M.getNamedValue(("__fps_stackidx_" + MF.getName()).str());
-  ThdStacksSym = M.getNamedValue("__fps_thd_stacks");
-  assert(StackIdxSym && ThdStacksSym);
-  // NHM-FIXME: Assertions.
+  // NHM-TODO: Probably should just move these to a full-fps-specific area.
+  StackIdxSym = cast_or_null<GlobalVariable>(M.getNamedValue(("__fps_stackidx_" + MF.getName()).str()));
+  ThdStacksSym =
+      cast_or_null<GlobalVariable>(M.getNamedValue("__fps_thd_stacks"));
+  FrameSizeSym = cast_or_null<GlobalVariable>(
+      M.getNamedValue(("__fps_framesize_" + MF.getName()).str()));
+  switch (F.fpsKind()) {
+  case Function::FullFPS:
+    assert(FrameSizeSym && StackIdxSym && ThdStacksSym);
+    break;
+  case Function::LeafFPS:
+    break;
+  default:
+    report_fatal_error("unhandled FPS kind");
+  }
 
   DebugLoc Loc;
 
@@ -780,10 +862,25 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   }
   PrivateFrameSize = llvm::alignTo(PrivateFrameSize, PrivateFrameAlign);
 
+  // LeafFPS: Create the stack frame.
+  if (F.fpsKind() == Function::LeafFPS) {
+    auto *Int8Ty = IntegerType::get(Ctx, 8);
+    auto *ArrTy = ArrayType::get(Int8Ty, PrivateFrameSize);
+    auto *ArrVal = Constant::getNullValue(ArrTy);
+    FPSSym = new GlobalVariable(
+        M, ArrTy, /*isConstant*/ false, GlobalVariable::InternalLinkage, ArrVal,
+        "__fps_stackframe_" + F.getName(),
+        /*InsertBefore*/ nullptr, GlobalVariable::InitialExecTLSModel);
+    // NHM-FIXME: ^ This should be local dynamic TLS model, not initial exec,
+    // ideally. Need to figure out how to integrate use of __tls_get_addr().
+  }
+
   // Collect restore points for stack pointer.
   assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses, PrivateFrameInfo);
-  emitPrologue(MF, PrivateFrameSize);
-  emitEpilogue(MF, PrivateFrameSize);
+  if (F.fpsKind() == Function::FullFPS) {
+    emitPrologue(MF, PrivateFrameSize);
+    emitEpilogue(MF, PrivateFrameSize);
+  }
 
   // Erase unused stack slots.
   for (const auto &[FI, _] : PrivateFrameInfo)
@@ -793,9 +890,18 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
   instrumentSetjmps(MF);
 
-  // Update register.
-  GlobalVariable *FrameSizeVar = cast<GlobalVariable>(M.getNamedValue(("__fps_framesize_" + F.getName()).str()));
-  FrameSizeVar->setInitializer(ConstantInt::get(IntegerType::get(M.getContext(), 64), PrivateFrameSize));
+  // Update frame size symbol with the correct constant.
+  if (FrameSizeSym) {
+    FrameSizeSym->setInitializer(ConstantInt::get(
+        IntegerType::get(M.getContext(), 64), PrivateFrameSize));
+  }
+
+  // Update the inline stack frame size if needed.
+  if (FPSSym) {
+    auto *Int8Ty = IntegerType::get(Ctx, 8);
+    auto *ArrTy = ArrayType::get(Int8Ty, PrivateFrameSize);
+    FPSSym->setInitializer(Constant::getNullValue(ArrTy));
+  }
 
   return true;
 }

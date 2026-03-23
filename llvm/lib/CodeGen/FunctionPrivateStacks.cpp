@@ -1,14 +1,18 @@
 #include "llvm/CodeGen/FunctionPrivateStacks.h" // NHM-TODO: Maybe don't need this?
 
+#include "llvm/Bitcode/LLVMBitCodes.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include <cstdint>
 
 using namespace llvm;
 
@@ -30,21 +34,71 @@ class FunctionPrivateStacks {
   StructType *RegInfoTy;
   
   void runOnFunction(Function &F, std::vector<Constant *> &RegInfos);
+  void runOnFunctionFull(Function &F, std::vector<Constant *> &RegInfos);
+  void runOnFunctionLeaf(Function &F);
+  GlobalVariable *createFrameSize(Function &F);
   
 public:
   FunctionPrivateStacks(Module &M) : M(M), Ctx(M.getContext()), Changed(false) {}
   bool run();
 };
 
-void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &RegInfos) {
-  // NHM-FIXME: Assert only works on 64-bit architectures.
+GlobalVariable *FunctionPrivateStacks::createFrameSize(Function &F) {
+  return new GlobalVariable(M, Int64Ty, /*isConstant*/ true,
+                            GlobalVariable::InternalLinkage,
+                            ConstantInt::get(Int64Ty, -1) /* NHM-FIXME */,
+                            "__fps_framesize_" + F.getName());
+}
 
+
+
+void FunctionPrivateStacks::runOnFunctionFull(Function &F, std::vector<Constant *> &RegInfos) {
   // NHM-FIXME: Should this always have private linkage?
   auto *StackIdxVar = new GlobalVariable(M, Int64Ty, /*isConstant*/false, GlobalVariable::InternalLinkage, Constant::getNullValue(Int64Ty) , "__fps_stackidx_" + F.getName());
   Constant *FnNameExpr = ConstantDataArray::getString(Ctx, F.getName(), true);
-  Constant *FnName = new GlobalVariable(M, FnNameExpr->getType(), /*isConsatnt*/true, GlobalVariable::PrivateLinkage, FnNameExpr);
-  auto *FrameSize = new GlobalVariable(M, Int64Ty, /*isConstant*/true, GlobalVariable::InternalLinkage, ConstantInt::get(Int64Ty, -1) /* NHM-FIXME */, "__fps_framesize_" + F.getName());
+  Constant *FnName =
+      new GlobalVariable(M, FnNameExpr->getType(), /*isConsatnt*/ true,
+                         GlobalVariable::PrivateLinkage, FnNameExpr);
+  auto *FrameSize = createFrameSize(F);
   RegInfos.push_back(ConstantStruct::get(RegInfoTy, StackIdxVar, FnName, FrameSize));
+}
+
+void FunctionPrivateStacks::runOnFunctionLeaf(Function &F) {
+  // Problem: We don't know the frame size until after register allocation in
+  // machine IR. Perhaps we could create a internal global variable for the
+  // frame size, then have machine IR actually update the constant's value.
+  // new GlobalVariable(M, PtrTy, /*isConstant*/ true,
+  // GlobalVariable::InternalLinkage, Constan
+  // NOTE: Disabling this, since we're trying to add it in machine IR instead.
+#if 0
+  auto *ArrTy = ArrayType::get(Int8Ty, 0);
+  auto *ArrVal = ConstantArray::get(ArrTy, {});
+  new GlobalVariable(M, ArrTy, false, GlobalVariable::InternalLinkage, ArrVal,
+                     "__fps_stackframe_" + F.getName());
+#endif
+}
+
+void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &RegInfos) {
+  // NHM-FIXME: Assert only works on 64-bit architectures.
+
+  // Compute the FPS kind.
+
+  if (F.doesNotRecurse()) {
+    F.setFPSKind(Function::LeafFPS);
+  } else {
+    F.setFPSKind(Function::FullFPS);
+  }
+
+  switch (F.fpsKind()) {
+    case Function::FullFPS:
+      runOnFunctionFull(F, RegInfos);
+      break;
+    case Function::LeafFPS:
+      runOnFunctionLeaf(F);
+      break;
+    default:
+      report_fatal_error("unimplemented: unhandled FPS kind");
+  }
 }
 
 bool FunctionPrivateStacks::run() {
