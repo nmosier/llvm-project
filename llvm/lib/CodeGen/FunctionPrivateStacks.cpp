@@ -21,7 +21,11 @@ namespace llvm {
 // NHM-FIXME: Fixup flags.
 cl::opt<bool> EnableFunctionPrivateStacks(
     "x86-function-private-stacks", cl::init(false), cl::Hidden);
-}
+cl::opt<bool> EnableLeafFPS("x86-function-private-stacks-leaf", cl::init(true),
+                            cl::Hidden);
+} // namespace llvm
+
+                                                                    
 
 namespace {
 
@@ -83,7 +87,7 @@ void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &
 
   // Compute the FPS kind.
 
-  if (F.doesNotRecurse()) {
+  if (EnableLeafFPS && F.doesNotRecurse()) {
     F.setFPSKind(Function::LeafFPS);
   } else {
     F.setFPSKind(Function::FullFPS);
