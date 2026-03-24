@@ -14,8 +14,6 @@ public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM); // NHM-TODO: Implement.
 };
 
-static inline constexpr uint64_t PrivateStackSize = 1024 * 1024;
-
 }
 
 #endif
