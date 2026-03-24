@@ -1,8 +1,6 @@
 #include "llvm/CodeGen/FunctionPrivateStacks.h" // NHM-TODO: Maybe don't need this?
 
-#include "llvm/Bitcode/LLVMBitCodes.h"
-#include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
@@ -12,17 +10,19 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
-#include <cstdint>
+#include "llvm/Pass.h"
+
+#define DEBUG_TYPE "fps"
 
 using namespace llvm;
 
 namespace llvm {
 
 // NHM-FIXME: Fixup flags.
-cl::opt<bool> EnableFunctionPrivateStacks(
-    "x86-function-private-stacks", cl::init(false), cl::Hidden);
 cl::opt<bool> EnableLeafFPS("x86-function-private-stacks-leaf", cl::init(true),
                             cl::Hidden);
+STATISTIC(FullFPSCount, "Number of functions with a full FPS");
+STATISTIC(LeafFPSCount, "Number of functions with a leaf FPS");
 } // namespace llvm
 
                                                                     
@@ -68,18 +68,8 @@ void FunctionPrivateStacks::runOnFunctionFull(Function &F, std::vector<Constant 
 }
 
 void FunctionPrivateStacks::runOnFunctionLeaf(Function &F) {
-  // Problem: We don't know the frame size until after register allocation in
-  // machine IR. Perhaps we could create a internal global variable for the
-  // frame size, then have machine IR actually update the constant's value.
-  // new GlobalVariable(M, PtrTy, /*isConstant*/ true,
-  // GlobalVariable::InternalLinkage, Constan
-  // NOTE: Disabling this, since we're trying to add it in machine IR instead.
-#if 0
-  auto *ArrTy = ArrayType::get(Int8Ty, 0);
-  auto *ArrVal = ConstantArray::get(ArrTy, {});
-  new GlobalVariable(M, ArrTy, false, GlobalVariable::InternalLinkage, ArrVal,
-                     "__fps_stackframe_" + F.getName());
-#endif
+  // NOTE: We don't do anything here, since the machine IR FPS pass is
+  // responsible for creating the thread-local FPS frame.
 }
 
 void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &RegInfos) {
@@ -89,8 +79,10 @@ void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &
 
   if (EnableLeafFPS && F.doesNotRecurse()) {
     F.setFPSKind(Function::LeafFPS);
+    ++LeafFPSCount;
   } else {
     F.setFPSKind(Function::FullFPS);
+    ++FullFPSCount;
   }
 
   switch (F.fpsKind()) {
@@ -106,6 +98,14 @@ void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &
 }
 
 bool FunctionPrivateStacks::run() {
+  // Do any functions in this module require a private stack?
+  // If not, don't do anything.
+  if (none_of(M, [](const Function &F) -> bool {
+    return !F.isDeclaration() && F.hasFnAttribute(Attribute::FunctionPrivateStack);
+  })) {
+    return false;
+  }
+  
   Int64Ty = IntegerType::get(Ctx, 64);
   PtrTy = PointerType::getUnqual(Ctx);
 
@@ -147,9 +147,7 @@ bool FunctionPrivateStacks::run() {
   appendToGlobalCtors(M, Ctor, 0);
   appendToGlobalDtors(M, Dtor, 0);
 
-  // NHM-FIXME: If there are no FPSes, then just skip.
-
-  return Changed;
+  return true;
 }
 
 class FunctionPrivateStacksLegacyPass : public ModulePass {
@@ -161,10 +159,6 @@ public:
   }
 
   bool runOnModule(Module &M) override {
-    // NHM-FIXME: check per-function flag.
-    if (!EnableFunctionPrivateStacks)
-      return false;
-
     FunctionPrivateStacks FPS(M);
     return FPS.run();
   }
