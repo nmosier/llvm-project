@@ -629,7 +629,8 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   }
 
   // NHM-FIXME: Check if we even need a function-private stack.
-  if (EnableFunctionPrivateStacks && false) {
+  // NHM-NOTE: Can we just delete this? Or it might include useful hints for future code.
+#if 0
     assert(Is64Bit && "Function-Private Stacks only supported in 64-bit mode!");
     for (MCRegAliasIterator AI(X86::RBX, this, true); AI.isValid(); ++AI)
       Reserved.set(*AI);
@@ -639,7 +640,7 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
     if (CM == CodeModel::Medium || CM == CodeModel::Large)
       for (MCRegAliasIterator AI(X86::R15, this, true); AI.isValid(); ++AI)
         Reserved.set(*AI);
-  }
+#endif
 
   assert(checkAllSuperRegsMarked(Reserved,
                                  {X86::SIL, X86::DIL, X86::BPL, X86::SPL,
