@@ -10,9 +10,10 @@
 #include "fps/fps_ll.h"
 
 // ===== PROJECTS ===== //
-// Resizeable, Pinned Stack Vectors: 
+// Resizeable, Pinned Stack Vectors: (OBSOLETE?)
 //  - use memfd_create? Well this doesn't play nicely with fork(). We'd need to instrument that.
 //  - two-level mapping should be enough.
+//  - NOTE: I think the above is obsoleted by our linked-list approach.
 //
 // OPTIONS:
 //  - disable exception/longjmp support. This means that the program should never execute a longjmp that
@@ -20,9 +21,22 @@
 //
 // FIXING GLOBAL ARRAYS:
 //  - we should actually make configs[] and stacks[] arrays that track their size. Maybe thru a global variable at first.
-
-// NHM-FIXME: Move somewhere more appropriate
-#define FPS_USE_MEMFDS SANITIZER_LINUX
+//
+// CUSTOM ALLOCATION FUNCTIONS:
+//  - Need to specify custom allocation functions.
+//
+// SUPPORT SINGLE-THREADED FPSes
+//  - A function can be compiled as 'single-thread FPS'
+//
+// USE DISTRIBUTED TLS STORAGE:
+//  - Just need to make sure to call __tls_get_addr() from within the FPS runtime before the function is ever called.
+//
+// NORECURSE:
+// - For functions that will not recurse, then we can just have a single private stack frame, and we can avoid the linked list and just have a single pointer. This should be the common case, and it should be faster.
+// 
+// CONSTANT FRAME SIZES:
+// - Right now, frame sizes are stored in read-only memory (.ro?). This means we have to do an additional load every time we want to add/sub; not good. 
+//   Surely there's a way to embed the constants. We can probably do a look up during machine IR and replace with constant value.
 
 // NHM-FIXME: Memory leak occurs when we resize arrays, methinks.
 
@@ -38,11 +52,8 @@ using ThreadID = safestack::ThreadId;
 void thread_cleanup_handler(void *_iter);
 void garbage_collect_threads(void);
 
-/// Default size of function-private stacks.
-const unsigned kDefaultFPSSize = 0x2800000;
-
-// NHM-FIXME: MAke a static variable of Livethread?
-constexpr size_t kMaxPrivateStacks = 0x100000;
+constexpr size_t kDefaultMaxPrivateStacks = 0x100000;
+size_t gMaxPrivateStacks = kDefaultMaxPrivateStacks;
 size_t gNumPrivateStacks = 0;
 
 struct frame_t;
@@ -99,15 +110,21 @@ frame_handle_t::operator frame_t*() const {
   return end - 1;
 }
 
-
-// NHM-FIXME: Make it illegal to copy this.
 struct fps_t {
   frame_handle_t current_frame;
   frame_t *top_frame; // NHM-FIXME: Don't need this necessarily.
   size_t private_frame_size;
 
   fps_t(): top_frame(nullptr), private_frame_size(0) {}
+  fps_t(const fps_t &) = delete;
+  fps_t &operator=(const fps_t &) = delete;
 
+private:
+  size_t getFrameAllocSize() const {
+    return sizeof(fps_t) + private_frame_size;
+  }
+
+public:
   bool registered() const {
     FPS_CHECK((current_frame && top_frame && private_frame_size) ||
               (!current_frame && !top_frame && !private_frame_size));
@@ -119,9 +136,7 @@ struct fps_t {
 
     this->private_frame_size = private_frame_size;
 
-    // NHM-FIXME: classify.
-    // NHM-FIXME: Should zero-initialize.
-    current_frame = (frame_t *) malloc(sizeof(frame_t) + private_frame_size);
+    current_frame = (frame_t *) malloc(getFrameAllocSize());
     FPS_CHECK(current_frame);
     current_frame->prev = current_frame;
     current_frame->next = current_frame;
@@ -133,7 +148,8 @@ struct fps_t {
     // Free frame linked list.
     for (frame_t *it = current_frame->prev; it != it->prev; ) {
       frame_t *prev = it->prev;
-      free(it);
+      memset(it, 0, getFrameAllocSize());
+      free(it); // NHM-FIXME: Creat function free_and_zero. Actually frees should just always free.
       it = prev;
     }
     for (frame_t *it = current_frame->next; it != it->next; ) {
@@ -167,7 +183,7 @@ struct fps_t {
       current_frame = top_frame;
   }
 
-  // NHM-TODO: Should be able to detect stack overflow? Or not?
+  // NHM-FIXME: probably want to allocatem more than just one.
   void MoreStack() {
     FPS_CHECK(current_frame->next == current_frame);
 
@@ -203,18 +219,6 @@ struct shared_config_t {
 shared_config_t *configs = nullptr;
 
 
-// NHM-FIXME: REname to 'DeadStack' or something more appropritae if we don't re-use this.
-class DeadMap {
-  void *base;
-  size_t len;
-public:
-  DeadMap(void *base, size_t len): base(base), len(len) {}
-  ~DeadMap() {
-    safestack::Munmap(base, len);
-  }
-};
-
-
 class LiveThread {
 public:
   // NHM-TODO: MAke private?
@@ -239,11 +243,6 @@ public:
 
   LiveThread(const LiveThread &) = delete;
   LiveThread &operator=(const LiveThread&) = delete;
-
-  // NHM-FIXME: Should accept new size as parameter.
-  void grow(size_t old_length, size_t new_length) {
-    FPS_CHECK(false && "Unsupported currently!");
-  }
 
   void registerStack(size_t index) {
     FPS_CHECK(index < num_private_stacks);
@@ -311,21 +310,29 @@ __attribute__((constructor(0))) void init_main_thread() {
   if (live_threads)
     return;
 
-  // NHM-FIXME: Add env variable for overriding number of private stacks.
+  if (const char *s = getenv("FPS_MAX")) {
+    char *end;
+    size_t max_private_stacks = strtoul(s, &end, 0);
+    if (!*end && *s)
+      gMaxPrivateStacks = max_private_stacks;
+    else
+      FPS_LOG("invalid number for FPS_MAX");
+  }
   
   // NHM-FIXME: Invert getVecSize() and map_length.
-  configs = (shared_config_t *) calloc(kMaxPrivateStacks, sizeof(shared_config_t));
+  configs = (shared_config_t *) calloc(gMaxPrivateStacks, sizeof(shared_config_t));
   FPS_CHECK(configs);
-  for (size_t i = 0; i < kMaxPrivateStacks; ++i)
+  for (size_t i = 0; i < gMaxPrivateStacks; ++i)
     new (&configs[i]) shared_config_t();
 
-  size_t stack_size = kDefaultFPSSize;
-  size_t guard_size = 4096;
+#if 0
+  // I wrote this 2 years ago, but I don't remember yet what I was aiming for.
   struct rlimit limit;
   if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY)
     stack_size = limit.rlim_cur;
+#endif
   
-  __fps_thread = live_threads = new (malloc(sizeof(LiveThread))) LiveThread(kMaxPrivateStacks);
+  __fps_thread = live_threads = new (malloc(sizeof(LiveThread))) LiveThread(gMaxPrivateStacks);
 
   // Setup the thread cleanup handler.
   if (pthread_key_create(&thread_cleanup_key, thread_cleanup_handler) < 0)
@@ -341,7 +348,7 @@ size_t getUnusedIndex() {
     if (!configs[i].registered)
       return i;
 
-  if (gNumPrivateStacks < kMaxPrivateStacks) {
+  if (gNumPrivateStacks < gMaxPrivateStacks) {
     FPS_CHECK(!configs[gNumPrivateStacks].registered);
     return gNumPrivateStacks++;
   }
@@ -419,7 +426,7 @@ void *thread_start(void *arg) {
   // Create a new thread.
   LiveThread *ref_thread = live_threads;
   FPS_CHECK(__fps_thread == nullptr);
-  __fps_thread = new (malloc(sizeof(LiveThread))) LiveThread(kMaxPrivateStacks);
+  __fps_thread = new (malloc(sizeof(LiveThread))) LiveThread(gMaxPrivateStacks);
   __fps_thread->next = ref_thread;
   live_threads = __fps_thread;
 #if 0
