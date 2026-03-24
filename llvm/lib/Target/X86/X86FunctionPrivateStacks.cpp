@@ -381,7 +381,6 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(
     MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
     const DenseMap<int, uint64_t> &PrivateFrameInfo) {
   // NHM-FIXME: This is horribly unoptimized.
-  const auto &MRI = MF.getRegInfo();
   auto &MFI = MF.getFrameInfo();
 
   // For now, just try running Register Scavenger on all windows.
@@ -862,10 +861,13 @@ const TargetRegisterClass *X86FunctionPrivateStacks::computeAddrBaseRegClass(
   }
   return RC;
 }
-  
+
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
-  if (!EnableFunctionPrivateStacks || MF.getName().starts_with("__fps_"))
-    return false;  
+  // Bail if the function doesn't have a `privatestack` attribute.
+  if (!MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack)) {
+    return false;
+  }
+  assert(!MF.getName().starts_with("__fps_"));
   
   TM = &MF.getTarget();
 
