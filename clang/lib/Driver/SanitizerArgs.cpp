@@ -1048,6 +1048,9 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
   if (AllAddedKinds & SanitizerKind::FunctionPrivateStacks)
     FunctionPrivateStacksRuntime = true;
 
+  if (AllAddedKinds & SanitizerKind::Lockbox)
+    LockboxRuntime = true;
+
   LinkRuntimes =
       Args.hasFlag(options::OPT_fsanitize_link_runtime,
                    options::OPT_fno_sanitize_link_runtime, LinkRuntimes);

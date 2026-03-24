@@ -136,6 +136,9 @@ SANITIZER("safe-stack", SafeStack)
 // Function-Private Stacks
 SANITIZER("fps", FunctionPrivateStacks)
 
+// Lockbox
+SANITIZER("lockbox", Lockbox)
+
 // Shadow Call Stack
 SANITIZER("shadow-call-stack", ShadowCallStack)
 
