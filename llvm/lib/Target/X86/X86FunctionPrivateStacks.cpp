@@ -1,18 +1,20 @@
 #include "llvm/CodeGen/FunctionPrivateStacks.h" // NHM-TODO: Maybe don't need this?
 
 #include "X86.h"
+#include "X86InstrInfo.h"
+#include "X86RegisterInfo.h"
 #include "X86Subtarget.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "MCTargetDesc/X86BaseInfo.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/CodeGen/RegAllocPBQP.h"
-#include "llvm/ADT/SmallSet.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 
 using namespace llvm;
@@ -66,6 +68,7 @@ private:
   const TargetInstrInfo *TII;
   const X86RegisterInfo *TRI;
   MachineFrameInfo *MFI;
+  MachineRegisterInfo *MRI;
   GlobalVariable *FPSSym;
   const GlobalVariable *StackIdxSym;
   const GlobalVariable *ThdStacksSym;
@@ -75,21 +78,26 @@ private:
   void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalValue *Member, Register Reg);
 
   // NOTE: Permits PtrReg == ValReg.
+  void loadPSPWithLiveEFLAGS(MachineBasicBlock &MBB,
+                         MachineBasicBlock::iterator MBBI, Register Reg,
+                         LivePhysRegs &LPR, const DebugLoc &Loc);
+  void loadPSPFullEFLAGS(MachineBasicBlock &MBB,
+                         MachineBasicBlock::iterator MBBI, Register Reg,
+                         Register ScratchReg, const DebugLoc &Loc);
+  void loadPSPLeafEFLAGS(MachineBasicBlock &MBB,
+                         MachineBasicBlock::iterator MBBI, Register Reg,
+                         Register ScratchReg, const DebugLoc &Loc);
   void loadPrivateStackPointer(MachineBasicBlock &MBB,
                                MachineBasicBlock::iterator MBBI, Register Reg,
                                const DebugLoc &Loc = DebugLoc());
   void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
                                    Register Reg,
-                                   bool LiveEFLAGS,
-                                   LivePhysRegs &LPR,
-                                   const DebugLoc &Loc = DebugLoc());
+                                   const DebugLoc &Loc);
   void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
-                                   Register Reg,
-                                   bool LiveEFLAGS,
-                                   LivePhysRegs &LPR,
-                                   const DebugLoc &Loc = DebugLoc());
+                                   Register Reg, const DebugLoc &Loc);
+  const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses);
 
 
   // NOTE: Does not permit PtrReg == ValReg.
@@ -98,7 +106,11 @@ private:
   bool frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses);
   bool instrumentSetjmps(MachineFunction &MF);
 
-  void partialRedundancyElimination(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, ArrayRef<MachineInstr *> Kills, SmallVectorImpl<std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>> &InsertPts);
+  void partialRedundancyElimination(
+      MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
+      ArrayRef<MachineInstr *> Kills,
+      SmallVectorImpl<std::pair<MachineBasicBlock *,
+                                MachineBasicBlock::iterator>> &InsertPts);
 
   void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, const DenseMap<int, uint64_t>& PrivateFrameInfo);
   // NHM-OPT: Could make it a fixed-size stack frame at first, set a flag in a thread-local variable __fps_stacktypes.
@@ -107,10 +119,12 @@ private:
   void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);
 };
 
-static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
-  for (MCPhysReg Reg : X86::GR64RegClass)
-    if (LPR.available(MRI, Reg) && !is_contained(IgnoreRegs, Reg))
+static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, const TargetRegisterClass &RC = X86::GR64RegClass, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
+  for (MCPhysReg Reg : RC) {
+    if (LPR.available(MRI, Reg) && !is_contained(IgnoreRegs, Reg)) {
       return Reg;
+    }
+  }
   return X86::NoRegister;
 }
 
@@ -150,13 +164,11 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
     return;
   
   MachineBasicBlock &EntryMBB = MF.front();
-  auto EntryMBBI = EntryMBB.begin();
-  const auto &MRI = MF.getRegInfo();
 
   SmallVector<MCPhysReg, 2> Regs;
   LivePhysRegs LPR(*TRI);
   LPR.addLiveIns(EntryMBB);
-  if (!getFreeRegs(LPR, MRI, 2, Regs))
+  if (!getFreeRegs(LPR, *MRI, 2, Regs))
     report_fatal_error("Failed to get free registers for FPS prologue!");
   assert(Regs.size() == 2);
   assert(!LPR.contains(X86::EFLAGS));
@@ -328,13 +340,12 @@ void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Privat
       continue;
 
     auto MBBI = MBB.back().getIterator();
-    const auto &MRI = MF.getRegInfo();
 
     SmallVector<MCPhysReg, 2> Regs;
     LivePhysRegs LPR(*TRI);
     LPR.addLiveOuts(MBB);
     LPR.stepBackward(MBB.back());
-    if (!getFreeRegs(LPR, MRI, 2, Regs))
+    if (!getFreeRegs(LPR, *MRI, 2, Regs))
       report_fatal_error("Failed to get free registers for FPS epilogue!");
     assert(Regs.size() == 2);
     assert(!LPR.contains(X86::EFLAGS));
@@ -366,7 +377,10 @@ void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Privat
   }
 }
 
-void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, const DenseMap<int, uint64_t> &PrivateFrameInfo) {
+void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(
+    MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
+    const DenseMap<int, uint64_t> &PrivateFrameInfo) {
+  // NHM-FIXME: This is horribly unoptimized.
   const auto &MRI = MF.getRegInfo();
   auto &MFI = MF.getFrameInfo();
 
@@ -465,9 +479,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(MachineFunction 
 
 void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
-    bool LiveEFLAGS, LivePhysRegs &LPR, const DebugLoc &Loc) {
-
-  assert(!LiveEFLAGS && "Live EFLAGS not handled yet");
+    const DebugLoc &Loc) {
 
   // Emit PSP reload code.
   // MOV r1, [rip+gottpoff(__fps_stackframe_<fn>@gottpoff)]
@@ -490,38 +502,24 @@ void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
 
 void X86FunctionPrivateStacks::loadPrivateStackPointerFull(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
-    bool LiveEFLAGS, LivePhysRegs &LPR, const DebugLoc &Loc) {
+    const DebugLoc &Loc) {
 
-  auto &MF = *MBB.getParent();
-  auto &MRI = MF.getRegInfo();
-  auto &MFI = MF.getFrameInfo();
+  getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Reg);
+  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Reg)
+      .addReg(Reg)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::NoRegister);
+}
 
-  if (LiveEFLAGS) {
-    MCPhysReg ScratchReg = getFreeReg(LPR, MRI, /*IgnoreRegs*/ {Reg});
-    bool Spill = (ScratchReg == X86::NoRegister);
-    int SpillFI = -1;
-    if (Spill) {
-      // Evict a spillable register.
-      // NHM-FIXME: Why is it ok that we are spilling the register here?
-      for (const MachineOperand &MO : MBBI->operands())
-        if (MO.isReg() && MO.isUse() && MO.getReg())
-          LPR.removeReg(MO.getReg());
-      ScratchReg = getSpillableReg(LPR, TRI, MRI);
-      if (!ScratchReg)
-        report_fatal_error("Failed to get spillable register for live EFLAGS!");
-
-      SpillFI = MFI.CreateSpillStackObject(8, Align(8));
-
-      // Insert spill to stack.
-      TII->storeRegToStackSlot(MBB, MBBI, ScratchReg, /*isKill*/ true, SpillFI,
-                               &X86::GR64RegClass, TRI, X86::NoRegister);
-    }
-
+void X86FunctionPrivateStacks::loadPSPFullEFLAGS(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
+    Register ScratchReg, const DebugLoc &Loc) {
     // Emit PSP reload code.
     // MOV r1, [rip+gottpoff(__fps_thd_stackptrs@gottpoff)]
     // MOV r1, fs:[r1]
     // MOV r2, [rip+__stackidx_<fn>]
-    DebugLoc Loc;
     BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
         .addReg(X86::RIP)
         .addImm(1)
@@ -548,30 +546,83 @@ void X86FunctionPrivateStacks::loadPrivateStackPointerFull(
         .addReg(Reg)
         .addImm(0)
         .addReg(X86::NoRegister);
+}
 
-    if (Spill) {
-      // Restore scratch register.
-      TII->loadRegFromStackSlot(MBB, MBBI, ScratchReg, SpillFI,
-                                &X86::GR64RegClass, TRI, X86::NoRegister);
-      BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mi32))
-          .addFrameIndex(SpillFI)
-          .addImm(1)
-          .addReg(X86::NoRegister)
-          .addImm(0)
-          .addReg(X86::NoRegister)
-          .addImm(0);
-      BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::LFENCE));
-    }
+void X86FunctionPrivateStacks::loadPSPLeafEFLAGS(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
+    Register ScratchReg, const DebugLoc &Loc) {
+  // MOV r1, [rip+gottpoff(__fps_stackframe_<fn>@gottpoff)]
+  // MOV r2, fs:[0]
+  // LEA r1, [r1+r2]
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Reg)
+      .addReg(X86::RIP)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addGlobalAddress(FPSSym, 0, X86II::MO_GOTTPOFF)
+      .addReg(X86::NoRegister);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
+      .addReg(X86::NoRegister)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(0)
+      .addReg(X86::FS);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::LEA64r), Reg)
+      .addReg(Reg)
+      .addImm(1)
+      .addReg(ScratchReg)
+      .addImm(0)
+      .addReg(X86::NoRegister);
+}
 
-  } else {
-    getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Reg);
-    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Reg)
-        .addReg(Reg)
+void X86FunctionPrivateStacks::loadPSPWithLiveEFLAGS(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
+    LivePhysRegs &LPR, const DebugLoc &Loc) {
+  MachineFunction &MF = *MBB.getParent();
+  const Function &F = MF.getFunction();
+  MCPhysReg ScratchReg = getFreeReg(LPR, *MRI, X86::GR64RegClass, /*IgnoreRegs*/ {Reg});
+  bool Spill = (ScratchReg == X86::NoRegister);
+  int SpillFI = -1;
+  if (Spill) {
+    // Evict a spillable register.
+    // NHM-FIXME: Why is it ok that we are spilling the register here?
+    for (const MachineOperand &MO : MBBI->operands())
+      if (MO.isReg() && MO.isUse() && MO.getReg())
+        LPR.removeReg(MO.getReg());
+    ScratchReg = getSpillableReg(LPR, TRI, *MRI);
+    if (!ScratchReg)
+      report_fatal_error("Failed to get spillable register for live EFLAGS!");
+
+    SpillFI = MFI->CreateSpillStackObject(8, Align(8));
+
+    // Insert spill to stack.
+    TII->storeRegToStackSlot(MBB, MBBI, ScratchReg, /*isKill*/ true, SpillFI,
+                             &X86::GR64RegClass, TRI, X86::NoRegister);
+  }
+
+  switch (F.fpsKind()) {
+  case Function::FullFPS:
+    loadPSPFullEFLAGS(MBB, MBBI, Reg, ScratchReg, Loc);
+    break;
+  case Function::LeafFPS:
+    loadPSPLeafEFLAGS(MBB, MBBI, Reg, ScratchReg, Loc);
+    break;
+  default:
+    report_fatal_error("unhandled FPS kind");
+  }
+
+  if (Spill) {
+    // Restore scratch register.
+    TII->loadRegFromStackSlot(MBB, MBBI, ScratchReg, SpillFI,
+                              &X86::GR64RegClass, TRI, X86::NoRegister);
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mi32))
+        .addFrameIndex(SpillFI)
         .addImm(1)
         .addReg(X86::NoRegister)
         .addImm(0)
-        .addReg(X86::NoRegister);
-  }
+        .addReg(X86::NoRegister)
+        .addImm(0);
+    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::LFENCE));
+  }    
 }
 
 void X86FunctionPrivateStacks::loadPrivateStackPointer(
@@ -579,7 +630,6 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(
     const DebugLoc &Loc) {
   const MachineFunction &MF = *MBB.getParent();
   const Function &F = MF.getFunction();
-  auto &MRI = MF.getRegInfo();
 
   LivePhysRegs LPR(*TRI);
   LPR.addLiveOuts(MBB);
@@ -588,15 +638,20 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(
     if (MI.getIterator() == MBBI)
       break;
   }
-  assert(LPR.available(MRI, Reg));
+  assert(LPR.available(*MRI, Reg));
   const bool LiveEFLAGS = LPR.contains(X86::EFLAGS);
-  
+  if (LiveEFLAGS) {
+    loadPSPWithLiveEFLAGS(MBB, MBBI, Reg, LPR, Loc);
+    return;
+  }
+
+  // Normal case: no live EFLAGS.
   switch (F.fpsKind()) {
   case Function::FullFPS:
-    loadPrivateStackPointerFull(MBB, MBBI, Reg, LiveEFLAGS, LPR, Loc);
+    loadPrivateStackPointerFull(MBB, MBBI, Reg, Loc);
     break;
   case Function::LeafFPS:
-    loadPrivateStackPointerLeaf(MBB, MBBI, Reg, LiveEFLAGS, LPR, Loc);
+    loadPrivateStackPointerLeaf(MBB, MBBI, Reg, Loc);
     break;
   default:
     report_fatal_error("unhandled FPS type");
@@ -789,6 +844,24 @@ bool X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
 
   return true;
 }
+
+const TargetRegisterClass *X86FunctionPrivateStacks::computeAddrBaseRegClass(
+    ArrayRef<const MachineOperand *> Uses) {
+  const TargetRegisterClass *RC = &X86::GR64RegClass;
+  for (const MachineOperand *MO : Uses) {
+    const MachineInstr &MI = *MO->getParent();
+    const TargetRegisterClass *ThisRC = MI.getRegClassConstraint(
+        X86::getFirstAddrOperandIdx(MI), TII, TRI);
+    if (ThisRC->hasSuperClass(RC)) {
+      RC = ThisRC;
+    } else if (ThisRC->hasSubClassEq(RC)) {
+      // Skip.
+    } else {
+      report_fatal_error("Expected RC with sub/superset containment!");
+    }
+  }
+  return RC;
+}
   
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   if (!EnableFunctionPrivateStacks || MF.getName().starts_with("__fps_"))
@@ -806,6 +879,7 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   TII = STI.getInstrInfo();
   TRI = STI.getRegisterInfo();
   MFI = &MF.getFrameInfo();
+  MRI = &MF.getRegInfo();
 
   // NHM-FIXME: Make it an assert?
 #if 0
@@ -846,6 +920,13 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     }
     if (Uses.empty())
       continue;
+
+    const TargetRegisterClass *RC = computeAddrBaseRegClass(Uses);
+    if (RC != &X86::GR64RegClass) {
+      LLVM_DEBUG(dbgs() << "skipping frame index " << FI
+                        << " which uses non-REX addressing\n");
+      continue;
+    }
 
     Align ObjAlign = MFI->getObjectAlign(FI);
     PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
@@ -896,17 +977,10 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
         IntegerType::get(M.getContext(), 64), PrivateFrameSize));
   }
 
-  // Update the inline stack frame size if needed.
-  if (FPSSym) {
-    auto *Int8Ty = IntegerType::get(Ctx, 8);
-    auto *ArrTy = ArrayType::get(Int8Ty, PrivateFrameSize);
-    FPSSym->setInitializer(Constant::getNullValue(ArrTy));
-  }
-
   return true;
 }
 
-}
+} // end namespace
 
 INITIALIZE_PASS(X86FunctionPrivateStacks, PASS_KEY, "X86 Function Private Stacks", false, false)
 
