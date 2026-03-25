@@ -844,6 +844,8 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_CORO_ONLY_DESTROY_WHEN_COMPLETE;
   case Attribute::DeadOnUnwind:
     return bitc::ATTR_KIND_DEAD_ON_UNWIND;
+  case Attribute::FunctionPrivateStack:
+    return bitc::ATTR_KIND_FUNCTION_PRIVATE_STACK;
   case Attribute::EndAttrKinds:
     llvm_unreachable("Can not encode end-attribute kinds marker.");
   case Attribute::None:
