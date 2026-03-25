@@ -994,6 +994,26 @@ private:
     Value::setValueSubclassData(D);
   }
   void setValueSubclassDataBit(unsigned Bit, bool On);
+
+public:
+  enum FPSKind {
+    /// This function doesn't require a private stack.
+    NoFPS,
+    /// A full function-private stack, with a linked list of stack frames. 
+    /// Supports recursion and multi-threading.
+    FullFPS, 
+    /// A function-private stack with only one stack frame (per thread).
+    /// Supports multi-threading, but not recursion. 
+    /// This should be used for all non-recursive functions for performance.
+    LeafFPS,
+  };
+
+private:
+  FPSKind FpsKind;
+
+public:
+  FPSKind fpsKind() const { return FpsKind; }
+  void setFPSKind(FPSKind fps_kind) { FpsKind = fps_kind; }
 };
 
 /// Check whether null pointer dereferencing is considered undefined behavior

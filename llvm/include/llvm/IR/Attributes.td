@@ -254,6 +254,12 @@ def SafeStack : EnumAttr<"safestack", [FnAttr]>;
 /// Shadow Call Stack protection.
 def ShadowCallStack : EnumAttr<"shadowcallstack", [FnAttr]>;
 
+/// Function-Private Stacks protection.
+def FunctionPrivateStack : EnumAttr<"privatestack", [FnAttr]>;
+
+/// Lockbox protection.
+def Lockbox : EnumAttr<"lockbox", [FnAttr]>;
+
 /// Sign extended before/after call.
 def SExt : EnumAttr<"signext", [ParamAttr, RetAttr]>;
 

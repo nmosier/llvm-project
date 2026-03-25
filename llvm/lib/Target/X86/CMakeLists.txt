@@ -85,6 +85,9 @@ set(sources
   X86WinEHState.cpp
   X86WinFixupBufferSecurityCheck.cpp
   X86InsertWait.cpp
+  X86MinimumDirectedMulticut.cpp
+  X86Serberus.cpp
+  X86FunctionPrivateStacks.cpp
   GISel/X86CallLowering.cpp
   GISel/X86InstructionSelector.cpp
   GISel/X86LegalizerInfo.cpp

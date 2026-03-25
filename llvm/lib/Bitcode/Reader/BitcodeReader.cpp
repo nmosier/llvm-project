@@ -2185,6 +2185,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::Range;
   case bitc::ATTR_KIND_INITIALIZES:
     return Attribute::Initializes;
+  case bitc::ATTR_KIND_FUNCTION_PRIVATE_STACK:
+    return Attribute::FunctionPrivateStack;
   }
 }
 
