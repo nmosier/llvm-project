@@ -548,6 +548,7 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(
   }
   assert(LPR.available(*MRI, Reg) || MRI->isReserved(Reg));
   const bool LiveEFLAGS = LPR.contains(X86::EFLAGS);
+  assert(!LiveEFLAGS && "Expected no live EFLAGS under new approach!");
   if (LiveEFLAGS) {
     loadPSPWithLiveEFLAGS(MBB, MBBI, Reg, LPR, Loc);
     return;
