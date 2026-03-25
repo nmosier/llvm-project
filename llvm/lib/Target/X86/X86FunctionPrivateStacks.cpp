@@ -1,9 +1,11 @@
 #include "llvm/CodeGen/FunctionPrivateStacks.h" // NHM-TODO: Maybe don't need this?
 
+#include "MCTargetDesc/X86MCTargetDesc.h"
 #include "X86.h"
 #include "X86InstrInfo.h"
 #include "X86RegisterInfo.h"
 #include "X86Subtarget.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
@@ -377,6 +379,62 @@ void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Privat
   }
 }
 
+static bool shouldReloadPSP(const MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI) {
+  const MachineFunction &MF = *MBB.getParent();
+  // Entry block?
+  if (&MBB == &MF.front() && MBBI == MBB.begin())
+    return true;
+  // Is EH pad?
+  if (MBB.isEHPad() && MBBI == MBB.begin())
+    return true;
+  // Is post-call?
+  if (MBBI != MBB.begin() && std::prev(MBBI)->isCall() && !std::prev(MBBI)->isReturn())
+    return true;
+
+  return false;
+}
+
+void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(
+    MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
+    const DenseMap<int, uint64_t> &PrivateFrameInfo) {
+
+  const auto isUse = [&](MachineInstr *MI) { return is_contained(Uses, MI); };
+
+  // Load stack pointer.
+  // Insertion points:
+  // - Post-calls
+  // - Function entrypoint
+  // - Exception blocks
+  for (MachineBasicBlock &MBB : MF) {
+    for (auto MBBI = MBB.begin();; ++MBBI) {
+      if (shouldReloadPSP(MBB, MBBI)) {
+        loadPrivateStackPointer(MBB, MBBI, X86::R15);
+      }
+      if (MBBI == MBB.end())
+        break;
+    }
+  }
+
+  // Fixup uses with PSP reg.
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineInstr &MI : MBB) {
+      if (!isUse(&MI))
+        continue;
+      const int MemRefIdx = X86::getFirstAddrOperandIdx(MI);
+      assert(MemRefIdx >= 0);
+      MachineOperand &BaseMO = MI.getOperand(MemRefIdx + X86::AddrBaseReg);
+      MachineOperand &DispMO = MI.getOperand(MemRefIdx + X86::AddrDisp);
+      assert(BaseMO.isFI());
+      assert(DispMO.isImm());
+      int FI = BaseMO.getIndex();
+      BaseMO.ChangeToRegister(X86::R15, /*isDef*/ false);
+      assert(PrivateFrameInfo.contains(FI));
+      DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
+    }
+  }
+}
+
+#if 0
 void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(
     MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
     const DenseMap<int, uint64_t> &PrivateFrameInfo) {
@@ -475,6 +533,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(
     
   }
 }
+#endif
 
 void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
@@ -637,7 +696,7 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(
     if (MI.getIterator() == MBBI)
       break;
   }
-  assert(LPR.available(*MRI, Reg));
+  assert(LPR.available(*MRI, Reg) || MRI->isReserved(Reg));
   const bool LiveEFLAGS = LPR.contains(X86::EFLAGS);
   if (LiveEFLAGS) {
     loadPSPWithLiveEFLAGS(MBB, MBBI, Reg, LPR, Loc);
@@ -868,6 +927,18 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     return false;
   }
   assert(!MF.getName().starts_with("__fps_"));
+
+  // NHM-FIXME: Remove this debug check.
+  for (const MachineBasicBlock &MBB : MF) {
+    for (const MachineInstr &MI : MBB) {
+      for (const MachineOperand &MO : MI.operands()) {
+        if (MO.isReg()) {
+          // NHM-FIXME: Make this a shared def somewhere?
+          assert(MO.getReg() != X86::R15); 
+        }
+      }
+    }
+  }
   
   TM = &MF.getTarget();
 
