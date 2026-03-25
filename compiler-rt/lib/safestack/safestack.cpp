@@ -212,6 +212,8 @@ INTERCEPTOR(int, pthread_create, pthread_t *thread,
   size_t size = 0;
   size_t guard = 0;
 
+  // fprintf(stderr, "[safestack] intercepted pthread_create\n");
+
   if (attr) {
     pthread_attr_getstacksize(attr, &size);
     pthread_attr_getguardsize(attr, &guard);

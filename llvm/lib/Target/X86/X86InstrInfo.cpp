@@ -4383,12 +4383,9 @@ static unsigned getLoadStoreRegOpcode(Register Reg,
 std::optional<ExtAddrMode>
 X86InstrInfo::getAddrModeFromMemoryOp(const MachineInstr &MemI,
                                       const TargetRegisterInfo *TRI) const {
-  const MCInstrDesc &Desc = MemI.getDesc();
-  int MemRefBegin = X86II::getMemoryOperandNo(Desc.TSFlags);
+  const int MemRefBegin = X86::getFirstAddrOperandIdx(MemI);
   if (MemRefBegin < 0)
     return std::nullopt;
-
-  MemRefBegin += X86II::getOperandBias(Desc);
 
   auto &BaseOp = MemI.getOperand(MemRefBegin + X86::AddrBaseReg);
   if (!BaseOp.isReg()) // Can be an MO_FrameIndex

@@ -80,6 +80,8 @@ add_llvm_component_library(LLVMCodeGen
   FinalizeISel.cpp
   FixupStatepointCallerSaved.cpp
   FuncletLayout.cpp
+  FunctionPrivateStacks.cpp
+  Lockbox.cpp
   GCMetadata.cpp
   GCMetadataPrinter.cpp
   GCRootLowering.cpp
