@@ -996,6 +996,7 @@ void TargetPassConfig::addISelPrepare() {
   // only protect functions that have corresponding attributes.
   addPass(createSafeStackPass());
   addPass(createFunctionPrivateStacksPass());
+  addPass(createLockboxPass());
   addPass(createStackProtectorPass());
 
   if (PrintISelInput)

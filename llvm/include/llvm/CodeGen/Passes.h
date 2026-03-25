@@ -480,6 +480,9 @@ namespace llvm {
   // NHM-TODO: Document.
   ModulePass *createFunctionPrivateStacksPass();
 
+  // NHM-TODO: Document.
+  FunctionPass *createLockboxPass();
+
   /// This pass detects subregister lanes in a virtual register that are used
   /// independently of other lanes and splits them into separate virtual
   /// registers.

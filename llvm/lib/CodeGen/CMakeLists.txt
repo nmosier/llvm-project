@@ -81,6 +81,7 @@ add_llvm_component_library(LLVMCodeGen
   FixupStatepointCallerSaved.cpp
   FuncletLayout.cpp
   FunctionPrivateStacks.cpp
+  Lockbox.cpp
   GCMetadata.cpp
   GCMetadataPrinter.cpp
   GCRootLowering.cpp

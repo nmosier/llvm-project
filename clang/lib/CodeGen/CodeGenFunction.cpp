@@ -799,6 +799,8 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
     Fn->addFnAttr(llvm::Attribute::ShadowCallStack);
   if (SanOpts.has(SanitizerKind::FunctionPrivateStacks))
     Fn->addFnAttr(llvm::Attribute::FunctionPrivateStack);
+  if (SanOpts.has(SanitizerKind::Lockbox))
+    Fn->addFnAttr(llvm::Attribute::Lockbox);
 
   // Apply fuzzing attribute to the function.
   if (SanOpts.hasOneOf(SanitizerKind::Fuzzer | SanitizerKind::FuzzerNoLink))

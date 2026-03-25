@@ -1443,6 +1443,11 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
     // NHM-TODO: Use non-whole static runtimes?
     StaticRuntimes.push_back("fps");
   }
+  if (SanArgs.needsLockboxRt() && SanArgs.linkRuntimes()) {
+    // NHM-TODO: We maybe don't even want a static runtime? Should be dynamic?
+    StaticRuntimes.push_back("lockbox");
+  }
+    
   if (!(SanArgs.needsSharedRt() && SanArgs.needsUbsanRt())) {
     if (SanArgs.needsCfiRt())
       StaticRuntimes.push_back("cfi");
