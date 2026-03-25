@@ -13,6 +13,7 @@
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "MCTargetDesc/X86BaseInfo.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
@@ -26,18 +27,18 @@ using namespace llvm;
 
 namespace {
 
+// NHM-FIXME: Is this used?
 cl::opt<bool> EnableOverflowChecks(
     PASS_KEY "-check-overflow",
     cl::desc("Enable overflow checks"), // NHM-FIXME
     cl::init(false),
     cl::Hidden);
 
-cl::opt<bool> FPSParanoid(
-    PASS_KEY "-paranoid",
-    cl::desc("Perform additional checks to prevent unlikely attack scenarios. "
-             "Currently this flag only causes the insertion of bounds checks."),
-    cl::init(false),
-    cl::Hidden);
+cl::opt<bool> EnableStrictMode(PASS_KEY "-strict",
+                               cl::desc("Enable strict mode, which enforces "
+                                        "that security requirements are met"),
+                               cl::init(false),
+                               cl::Hidden);
 
 // NHM-FIXME: Move to more sane location.
 // NHM-FIXME: Make structs for these.
@@ -841,11 +842,12 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   MRI = &MF.getRegInfo();
 
   // NHM-FIXME: Make it an assert?
-#if 0
-  if (TRI->hasBasePointer(MF))
-    report_fatal_error("No function should have base pointer with FPS enabled!");
-  assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
-#endif
+  // NHM-FIXME: Why was this disabled? Minimally, we should check if SafeStack
+  // was enabled (it's a function attribute).
+  if (EnableStrictMode) {
+    assert(!TRI->hasBasePointer(MF) && "No function should have a base pointer!");
+    assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
+  }
 
   // NHM-TODO: Probably should just move these to a full-fps-specific area.
   StackIdxSym = cast_or_null<GlobalVariable>(M.getNamedValue(("__fps_stackidx_" + MF.getName()).str()));
