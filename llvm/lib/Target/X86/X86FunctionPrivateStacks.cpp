@@ -106,6 +106,9 @@ private:
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
 
   bool frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses);
+  uint64_t collectPrivateFrameObjects(MachineFunction &MF,
+                                      DenseMap<int, uint64_t> &PrivateFrameInfo,
+                                      SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses);
   bool instrumentSetjmps(MachineFunction &MF);
 
   void partialRedundancyElimination(
@@ -162,8 +165,7 @@ static MCPhysReg getSpillableReg(const LivePhysRegs &LPR, const TargetRegisterIn
 
 
 void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) {
-  if (PrivateFrameSize == 0)
-    return;
+  assert(PrivateFrameSize > 0);
   
   MachineBasicBlock &EntryMBB = MF.front();
 
@@ -276,59 +278,6 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
   }
   TII->insertUnconditionalBranch(AllocMBB, &CheckMBB, DebugLoc());  
   AllocMBB.addSuccessor(&CheckMBB);
-
-#if 0
-  // EntryMBB:
-  //  void *r1 = r1->stackptr;
-  //  r1 = r1 - PrivateFrameSize;
-  //  r0->stackptr = r1;
-  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
-      .addReg(Regs[0])
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(0) // NHM-FIXME: Symbolize
-      .addReg(X86::NoRegister);
-  BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::SUB64ri32), Regs[1])
-      .addReg(Regs[1])
-      .addImm(PrivateFrameSize);
-#if 0
-  auto *DummyVar = MF.getFunction().getParent()->getNamedValue(("__fps_dummy_" + MF.getName()).str());
-  assert(DummyVar);
-  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::CMOV64rm), Regs[1])
-      .addReg(Regs[1])
-      .addReg(X86::RIP)
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addGlobalAddress(DummyVar)
-      .addReg(X86::NoRegister)
-      .addImm(X86::COND_B); // If carry flag was set, then the input was zero, or we have a huge frame that jumped over the guard.
-  // Either way, the sae behavior is to load in the dummy value.
-  if (EnableOverflowChecks) {
-    BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::CMP64rm))
-        .addReg(Regs[1])
-        .addReg(Regs[0])
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(8) // NHM-FIXME: symbolize
-        .addReg(X86::NoRegister);
-    BuildMI(EntryMBB, EntryMBBI, Loc, TII->get(X86::CMOV64rm), Regs[1])
-        .addReg(Regs[1])
-        .addReg(X86::RIP)
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addGlobalAddress(DummyVar)
-        .addReg(X86::NoRegister)
-        .addImm(X86::COND_B);
-  }
-#endif
-  BuildMI(EntryMBB, EntryMBBI, DebugLoc(), TII->get(X86::MOV64mr))
-      .addReg(Regs[0])
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(0)
-      .addReg(X86::NoRegister)
-      .addReg(Regs[1]);
-#endif
 }
 
 void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {
@@ -820,6 +769,44 @@ const TargetRegisterClass *X86FunctionPrivateStacks::computeAddrBaseRegClass(
   return RC;
 }
 
+uint64_t X86FunctionPrivateStacks::collectPrivateFrameObjects(
+    MachineFunction &MF, DenseMap<int, uint64_t> &PrivateFrameInfo,
+    SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses) {
+  uint64_t PrivateFrameSize = 0;
+  Align PrivateFrameAlign;
+  for (int FI = MFI->getObjectIndexBegin(); FI < MFI->getObjectIndexEnd(); ++FI) {
+    if (MFI->isFixedObjectIndex(FI))
+      continue;
+    SmallVector<MachineOperand *> Uses;
+    if (!frameIndexOnlyUsedInMemoryOperands(FI, MF, Uses)) {
+      LLVM_DEBUG(dbgs() << "skipping frame index " << FI << " which has a non-memory-operand use\n");
+      continue;
+    }
+    if (Uses.empty())
+      continue;
+
+    const TargetRegisterClass *RC = computeAddrBaseRegClass(Uses);
+    if (RC != &X86::GR64RegClass) {
+      LLVM_DEBUG(dbgs() << "skipping frame index " << FI
+                        << " which uses non-REX addressing\n");
+      continue;
+    }
+
+    Align ObjAlign = MFI->getObjectAlign(FI);
+    PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
+    PrivateFrameSize = llvm::alignTo(PrivateFrameSize, ObjAlign);
+    PrivateFrameInfo[FI] = PrivateFrameSize;
+    assert(MFI->getObjectSize(FI) > 0);
+    PrivateFrameSize += MFI->getObjectSize(FI);
+
+    for (MachineOperand *UseOp : Uses) {
+      MachineInstr *MI = UseOp->getParent();
+      PrivateFrameAccesses.push_back(MI);
+    }
+  }
+  return llvm::alignTo(PrivateFrameSize, PrivateFrameAlign);
+}
+
 bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   // Bail if the function doesn't have a `privatestack` attribute.
   if (!MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack)) {
@@ -880,40 +867,14 @@ bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
   DenseMap<int, uint64_t> PrivateFrameInfo;
   SmallVector<MachineInstr *> PrivateFrameAccesses;
-  uint64_t PrivateFrameSize = 0;
-  Align PrivateFrameAlign;
-  for (int FI = MFI->getObjectIndexBegin(); FI < MFI->getObjectIndexEnd(); ++FI) {
-    if (MFI->isFixedObjectIndex(FI))
-      continue;
-    SmallVector<MachineOperand *> Uses;
-    if (!frameIndexOnlyUsedInMemoryOperands(FI, MF, Uses)) {
-      LLVM_DEBUG(dbgs() << "skipping frame index " << FI << " which has a non-memory-operand use\n");
-      continue;
-    }
-    if (Uses.empty())
-      continue;
+  uint64_t PrivateFrameSize =
+      collectPrivateFrameObjects(MF, PrivateFrameInfo, PrivateFrameAccesses);
 
-    const TargetRegisterClass *RC = computeAddrBaseRegClass(Uses);
-    if (RC != &X86::GR64RegClass) {
-      LLVM_DEBUG(dbgs() << "skipping frame index " << FI
-                        << " which uses non-REX addressing\n");
-      continue;
-    }
-
-    Align ObjAlign = MFI->getObjectAlign(FI);
-    PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
-    PrivateFrameSize = llvm::alignTo(PrivateFrameSize, ObjAlign);
-    PrivateFrameInfo[FI] = PrivateFrameSize;
-    assert(MFI->getObjectSize(FI) > 0);
-    PrivateFrameSize += MFI->getObjectSize(FI);
-
-    // Move uses to safe stack.
-    for (MachineOperand *UseOp : Uses) {
-      MachineInstr *MI = UseOp->getParent();
-      PrivateFrameAccesses.push_back(MI);
-    }
+  if (PrivateFrameSize == 0) {
+    // NHM-TODO: It turns out we actually didn't to reserve the PSP register
+    // (currently R15). This means that, in theory, we could un-spill some registers.
+    return false;
   }
-  PrivateFrameSize = llvm::alignTo(PrivateFrameSize, PrivateFrameAlign);
 
   // LeafFPS: Create the stack frame.
   if (F.fpsKind() == Function::LeafFPS) {
