@@ -517,6 +517,14 @@ AArch64RegisterInfo::getStrictlyReservedRegs(const MachineFunction &MF) const {
                 "Unexpected order of registers");
   Reserved.set(AArch64::Q0_HI, AArch64::Q31_HI);
 
+  // FPS: Mark x15 (the private stack pointer) as reserved, if the function
+  // has a private stack.
+  // NHM-FIXME: Remove the 'Function' prefix from this attribute; it's
+  // redundant.
+  // NHM-FIXME: Use shared def of AArch::X15.
+  if (MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack))
+    markSuperRegs(Reserved, AArch64::X15);
+
   return Reserved;
 }
 
