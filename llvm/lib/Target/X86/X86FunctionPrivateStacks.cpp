@@ -60,8 +60,6 @@ class X86FunctionPrivateStacks : public MachineFunctionPass {
 public:
   static char ID;
 
-  FunctionPass *RegAllocPass;
-
   X86FunctionPrivateStacks() : MachineFunctionPass(ID) {
     initializeX86FunctionPrivateStacksPass(*PassRegistry::getPassRegistry());
   }
