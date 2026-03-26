@@ -94,6 +94,7 @@ add_llvm_target(AArch64CodeGen
   MachineSMEABIPass.cpp
   AArch64SIMDInstrOpt.cpp
   AArch64PrologueEpilogue.cpp
+  AArch64FunctionPrivateStacks.cpp
 
   DEPENDS
   intrinsics_gen
