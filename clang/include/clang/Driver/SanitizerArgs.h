@@ -62,6 +62,8 @@ class SanitizerArgs {
   bool LinkCXXRuntimes = false;
   bool NeedPIE = false;
   bool SafeStackRuntime = false;
+  bool FunctionPrivateStacksRuntime = false;
+  bool LockboxRuntime = false;
   bool Stats = false;
   bool TsanMemoryAccess = true;
   bool TsanFuncEntryExit = true;
@@ -109,6 +111,8 @@ public:
   bool needsSafeStackRt() const { return SafeStackRuntime; }
   bool needsCfiCrossDsoRt() const;
   bool needsCfiCrossDsoDiagRt() const;
+  bool needsFPSRt() const { return FunctionPrivateStacksRuntime; }
+  bool needsLockboxRt() const { return LockboxRuntime; }
   bool needsStatsRt() const { return Stats; }
   bool needsScudoRt() const { return Sanitizers.has(SanitizerKind::Scudo); }
   bool needsNsanRt() const {

@@ -6740,6 +6740,7 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     return;
   }
   case Intrinsic::eh_sjlj_setjmp: {
+    DAG.dump();
     SDValue Ops[2];
     Ops[0] = getRoot();
     Ops[1] = getValue(I.getArgOperand(0));

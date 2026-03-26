@@ -180,6 +180,11 @@ public:
   constrainRegClassToNonRex2(const TargetRegisterClass *RC) const;
 
   bool isNonRex2RegClass(const TargetRegisterClass *RC) const;
+
+  // NHM-FIXME: Maybe we don't need this anymore?
+  bool requiresRegisterScavenging(const MachineFunction &MF) const override {
+    return true;
+  }
 };
 
 } // End llvm namespace

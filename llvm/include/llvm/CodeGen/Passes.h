@@ -529,6 +529,12 @@ LLVM_ABI ModulePass *createMachineOutlinerPass(bool RunOnAllFunctions = true);
 /// This pass expands the reduction intrinsics into sequences of shuffles.
 LLVM_ABI FunctionPass *createExpandReductionsPass();
 
+// NHM-TODO: Document.
+LLVM_ABI ModulePass *createFunctionPrivateStacksPass();
+
+// NHM-TODO: Document.
+LLVM_ABI FunctionPass *createLockboxPass();
+
 // This pass replaces intrinsics operating on vector operands with calls to
 // the corresponding function in a vector library (e.g., SVML, libmvec).
 LLVM_ABI FunctionPass *createReplaceWithVeclibLegacyPass();

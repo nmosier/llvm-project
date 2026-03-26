@@ -1,0 +1,1 @@
+- fps, x86: avoid redundant PSP loads in prologue/epilogue

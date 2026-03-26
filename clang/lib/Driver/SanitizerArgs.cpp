@@ -42,6 +42,7 @@ static const SanitizerMask NeedsUnwindTables =
     SanitizerKind::Address | SanitizerKind::HWAddress | SanitizerKind::Type |
     SanitizerKind::Thread | SanitizerKind::Memory | SanitizerKind::DataFlow |
     SanitizerKind::NumericalStability;
+// NHM-TODO: Add support.
 static const SanitizerMask SupportsCoverage =
     SanitizerKind::Address | SanitizerKind::HWAddress |
     SanitizerKind::KernelAddress | SanitizerKind::KernelHWAddress |
@@ -607,6 +608,7 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
     }
   }
 
+  // NHM-FIXME: Add incompatible groups for FPS.
   std::pair<SanitizerMask, SanitizerMask> IncompatibleGroups[] = {
       std::make_pair(SanitizerKind::Address,
                      SanitizerKind::Thread | SanitizerKind::Memory),
@@ -1156,6 +1158,12 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
     SafeStackRuntime =
         !TC.getTriple().isAndroid() && !TC.getTriple().isOSFuchsia();
   }
+
+  if (AllAddedKinds & SanitizerKind::FunctionPrivateStacks)
+    FunctionPrivateStacksRuntime = true;
+
+  if (AllAddedKinds & SanitizerKind::Lockbox)
+    LockboxRuntime = true;
 
   LinkRuntimes = Args.hasFlag(options::OPT_fsanitize_link_runtime,
                               options::OPT_fno_sanitize_link_runtime,

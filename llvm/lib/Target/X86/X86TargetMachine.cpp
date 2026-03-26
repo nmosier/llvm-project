@@ -108,6 +108,8 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   initializeX86DynAllocaExpanderPass(PR);
   initializeX86SuppressAPXForRelocationPassPass(PR);
   initializeX86WinEHUnwindV2Pass(PR);
+  initializeX86SerberusPassPass(PR);
+  initializeX86FunctionPrivateStacksPass(PR);
 }
 
 static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
@@ -587,6 +589,7 @@ void X86PassConfig::addPostRegAlloc() {
   // analyses needed by the LVIHardening pass when compiling at -O0.
   if (getOptLevel() != CodeGenOptLevel::None)
     addPass(createX86LoadValueInjectionLoadHardeningPass());
+  addPass(createX86FunctionPrivateStacksPass()); // NHM-FIXME: Probably need to move this elsewhere.  
 }
 
 void X86PassConfig::addPreSched2() {
@@ -615,6 +618,7 @@ void X86PassConfig::addPreEmitPass() {
   addPass(createX86DiscriminateMemOpsPass());
   addPass(createX86InsertPrefetchPass());
   addPass(createX86InsertX87waitPass());
+  addPass(createX86SerberusPass());
 }
 
 void X86PassConfig::addPreEmitPass2() {

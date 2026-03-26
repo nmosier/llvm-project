@@ -221,7 +221,7 @@ static unsigned getFrameIndexOperandNum(MachineInstr &MI) {
 RegScavenger::ScavengedInfo &
 RegScavenger::spill(Register Reg, const TargetRegisterClass &RC, int SPAdj,
                     MachineBasicBlock::iterator Before,
-                    MachineBasicBlock::iterator &UseMI) {
+                    MachineBasicBlock::iterator &UseMI, bool EliminateFrameIndex) {
   // Find an available scavenging slot with size and alignment matching
   // the requirements of the class RC.
   const MachineFunction &MF = *Before->getMF();
@@ -280,14 +280,16 @@ RegScavenger::spill(Register Reg, const TargetRegisterClass &RC, int SPAdj,
     MachineBasicBlock::iterator II = std::prev(Before);
 
     unsigned FIOperandNum = getFrameIndexOperandNum(*II);
-    TRI->eliminateFrameIndex(II, SPAdj, FIOperandNum, this);
+    if (EliminateFrameIndex)
+      TRI->eliminateFrameIndex(II, SPAdj, FIOperandNum, this);
 
     // Restore the scavenged register before its use (or first terminator).
     TII->loadRegFromStackSlot(*MBB, UseMI, Reg, FI, &RC, TRI, Register());
     II = std::prev(UseMI);
 
     FIOperandNum = getFrameIndexOperandNum(*II);
-    TRI->eliminateFrameIndex(II, SPAdj, FIOperandNum, this);
+    if (EliminateFrameIndex)
+      TRI->eliminateFrameIndex(II, SPAdj, FIOperandNum, this);
   }
   return Scavenged[SI];
 }
@@ -295,7 +297,8 @@ RegScavenger::spill(Register Reg, const TargetRegisterClass &RC, int SPAdj,
 Register RegScavenger::scavengeRegisterBackwards(const TargetRegisterClass &RC,
                                                  MachineBasicBlock::iterator To,
                                                  bool RestoreAfter, int SPAdj,
-                                                 bool AllowSpill) {
+                                                 bool AllowSpill,
+                                                 bool EliminateFrameIndex) {
   const MachineBasicBlock &MBB = *To->getParent();
   const MachineFunction &MF = *MBB.getParent();
 
@@ -316,13 +319,14 @@ Register RegScavenger::scavengeRegisterBackwards(const TargetRegisterClass &RC,
   if (!AllowSpill)
     return 0;
 
-  assert(Reg != 0 && "No register left to scavenge!");
+  if (Reg == 0)
+    return 0;
 
   MachineBasicBlock::iterator ReloadBefore =
       RestoreAfter ? std::next(MBBI) : MBBI;
   if (ReloadBefore != MBB.end())
     LLVM_DEBUG(dbgs() << "Reload before: " << *ReloadBefore << '\n');
-  ScavengedInfo &Scavenged = spill(Reg, RC, SPAdj, SpillBefore, ReloadBefore);
+  ScavengedInfo &Scavenged = spill(Reg, RC, SPAdj, SpillBefore, ReloadBefore, EliminateFrameIndex);
   Scavenged.Restore = &*std::prev(SpillBefore);
   LiveUnits.removeReg(Reg);
   LLVM_DEBUG(dbgs() << "Scavenged register with spill: " << printReg(Reg, TRI)
