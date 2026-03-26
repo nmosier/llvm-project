@@ -1081,14 +1081,17 @@ bool X86ExpandPseudo::expandPseudosWhichAffectControlFlow(MachineFunction &MF) {
   // Currently pseudo which affects control flow is only
   // X86::VASTART_SAVE_XMM_REGS which is located in Entry block.
   // So we do not need to evaluate other blocks.
-  for (MachineInstr &Instr : MF.front().instrs()) {
-    if (Instr.getOpcode() == X86::VASTART_SAVE_XMM_REGS) {
-      expandVastartSaveXmmRegs(&(MF.front()), Instr);
-      return true;
-    }
-  }
+  // NHM-FIXME: Update comment accordingly.
+  SmallVector<MachineInstr *> Worklist;
+  for (MachineBasicBlock &MBB : MF)
+    for (MachineInstr &MI : MBB)
+      if (MI.getOpcode() == X86::VASTART_SAVE_XMM_REGS)
+        Worklist.push_back(&MI);
 
-  return false;
+  for (MachineInstr *MI : Worklist)
+    expandVastartSaveXmmRegs(MI->getParent(), *MI);
+  
+  return !Worklist.empty();
 }
 
 bool X86ExpandPseudo::runOnMachineFunction(MachineFunction &MF) {

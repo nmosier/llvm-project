@@ -841,6 +841,10 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
     Fn->addFnAttr(llvm::Attribute::SafeStack);
   if (SanOpts.has(SanitizerKind::ShadowCallStack))
     Fn->addFnAttr(llvm::Attribute::ShadowCallStack);
+  if (SanOpts.has(SanitizerKind::FunctionPrivateStacks))
+    Fn->addFnAttr(llvm::Attribute::FunctionPrivateStack);
+  if (SanOpts.has(SanitizerKind::Lockbox))
+    Fn->addFnAttr(llvm::Attribute::Lockbox);
 
   if (SanOpts.has(SanitizerKind::Realtime))
     if (FD && FD->getASTContext().hasAnyFunctionEffects())

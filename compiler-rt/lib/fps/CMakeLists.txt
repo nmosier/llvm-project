@@ -1,0 +1,19 @@
+add_compiler_rt_component(fps)
+
+set(FPS_SOURCES
+  fps.cpp
+)
+
+include_directories(..) # TODO: Not sure if this is needed.
+
+set(FPS_CFLAGS ${SANITIZER_COMMON_CFLAGS})
+
+# NHM-FIXME: Should this be shared?
+foreach(arch ${FPS_SUPPORTED_ARCH})
+  add_compiler_rt_runtime(clang_rt.fps
+    STATIC
+    ARCHS ${arch}
+    SOURCES ${FPS_SOURCES}
+    CFLAGS ${FPS_CFLAGS} -O0 -g # NHM-TODO: Remove these extra flags.
+    PARENT_TARGET fps)
+endforeach()
