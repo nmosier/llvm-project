@@ -127,18 +127,6 @@ static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &
   return X86::NoRegister;
 }
 
-static bool getFreeRegs(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, unsigned NumFreeRegs, SmallVectorImpl<MCPhysReg> &FreeRegs) {
-  for (MCPhysReg Reg : X86::GR64RegClass) {
-    if (LPR.available(MRI, Reg)) {
-      FreeRegs.push_back(Reg);
-      if (FreeRegs.size() == NumFreeRegs)
-        return true;
-    }
-  }
-  assert(FreeRegs.size() < NumFreeRegs);
-  return false;
-}
-
 void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) {
   assert(PrivateFrameSize > 0);
   assert(MF.getFunction().fpsKind() == Function::FullFPS);
@@ -263,8 +251,8 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
 }
 
 void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {
-  if (PrivateFrameSize == 0)
-    return;
+  assert(PrivateFrameSize > 0);
+  assert(MF.getFunction().fpsKind() == Function::FullFPS);
 
   DebugLoc Loc;
 
@@ -274,26 +262,20 @@ void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Privat
 
     auto MBBI = MBB.back().getIterator();
 
-    SmallVector<MCPhysReg, 2> Regs;
     LivePhysRegs LPR(*TRI);
     LPR.addLiveOuts(MBB);
     LPR.stepBackward(MBB.back());
-    if (!getFreeRegs(LPR, *MRI, 2, Regs))
-      report_fatal_error("Failed to get free registers for FPS epilogue!");
-    assert(Regs.size() == 2);
     assert(!LPR.contains(X86::EFLAGS));
+    MCPhysReg ScratchReg = getFreeReg(LPR, *MRI);
+    if (ScratchReg == X86::NoRegister)
+      report_fatal_error("Failed to get scratach register for FPS epilogue!");
+    std::array<MCPhysReg, 2> Regs = {ScratchReg, PSPReg};
 
     // fps_t *r0 = ...;
     // frame_t *r1 = r0->current_frame;
     // r1 = r1->prev;
     // r0->current_frame = r1;
     getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Regs[0]);
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
-        .addReg(Regs[0])
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(offsetof_fps_current_frame)
-        .addReg(X86::NoRegister);
     BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
         .addReg(Regs[1])
         .addImm(1)
