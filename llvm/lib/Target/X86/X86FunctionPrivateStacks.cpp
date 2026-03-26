@@ -47,6 +47,7 @@ constexpr int offsetof_fps_current_frame = 0; // offsetof(fps_t, current_frame)
 constexpr int offsetof_frame_prev = -16; // offsetof(frame_t, prev)
 constexpr int offsetof_frame_next = -8; // offsetof(frame_t, next)
 
+static constexpr MCPhysReg PSPReg = X86::R15;
 
 // NHM-FIXME: This must be implemented somewhere.
 // NHM-FIXME: use llvm::alignTo
@@ -138,36 +139,21 @@ static bool getFreeRegs(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI,
   return false;
 }
 
-static MCPhysReg getSpillableReg(const LivePhysRegs &LPR, const TargetRegisterInfo *TRI, const MachineRegisterInfo &MRI) {
-  auto it = find_if(X86::GR64RegClass, [&] (MCPhysReg Reg) -> bool {
-    if (LPR.contains(Reg))
-      return true;
-    if (MRI.isReserved(Reg))
-      return false;
-    for (MCRegAliasIterator R(Reg, TRI, false); R.isValid(); ++R)
-      if (LPR.contains(*R))
-        return true;
-    return false;
-  });
-  if (it == std::end(X86::GR64RegClass))
-    return X86::NoRegister;
-  else
-    return *it;
-};
-
-
-
 void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) {
   assert(PrivateFrameSize > 0);
-  
+  assert(MF.getFunction().fpsKind() == Function::FullFPS);
+
   MachineBasicBlock &EntryMBB = MF.front();
 
-  SmallVector<MCPhysReg, 2> Regs;
+  // Claim a scratch register for use in checking whether we've reached the end
+  // of the FPS linked list of stack frames.
   LivePhysRegs LPR(*TRI);
   LPR.addLiveIns(EntryMBB);
-  if (!getFreeRegs(LPR, *MRI, 2, Regs))
-    report_fatal_error("Failed to get free registers for FPS prologue!");
-  assert(Regs.size() == 2);
+  MCPhysReg ScratchReg = getFreeReg(LPR, *MRI);
+  if (ScratchReg == X86::NoRegister)
+    report_fatal_error("Failed to get free scratch register for FPS prologue!");
+
+  // Make sure EFLAGS isn't live-in to the function, as we will clobber it.
   assert(!LPR.contains(X86::EFLAGS));
 
   const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
@@ -185,6 +171,9 @@ void X86FunctionPrivateStacks::emitPrologue(MachineFunction &MF, unsigned Privat
     NewEntryMBB.addLiveIn(LI);
   }
   NewEntryMBB.addSuccessor(&CheckMBB);
+
+  // NHM-TODO: Propagate to uses and eliminate this array.
+  std::array<MCPhysReg, 2> Regs = {ScratchReg, PSPReg};
 
   // CheckMBB:
   //  fps_t *r0 <- get fps pointer
@@ -323,8 +312,9 @@ void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Privat
 
 static bool shouldReloadPSP(const MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI) {
   const MachineFunction &MF = *MBB.getParent();
-  // Entry block?
-  if (&MBB == &MF.front() && MBBI == MBB.begin())
+  // Entry block? Needed for LeafFPS (no prologue); FullFPS prologue handles it.
+  if (MF.getFunction().fpsKind() != Function::FullFPS &&
+      &MBB == &MF.front() && MBBI == MBB.begin())
     return true;
   // Is EH pad?
   if (MBB.isEHPad() && MBBI == MBB.begin())
@@ -350,7 +340,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(
   for (MachineBasicBlock &MBB : MF) {
     for (auto MBBI = MBB.begin();; ++MBBI) {
       if (shouldReloadPSP(MBB, MBBI)) {
-        loadPrivateStackPointer(MBB, MBBI, X86::R15);
+        loadPrivateStackPointer(MBB, MBBI, PSPReg);
       }
       if (MBBI == MBB.end())
         break;
@@ -369,7 +359,7 @@ void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(
       assert(BaseMO.isFI());
       assert(DispMO.isImm());
       int FI = BaseMO.getIndex();
-      BaseMO.ChangeToRegister(X86::R15, /*isDef*/ false);
+      BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
       assert(PrivateFrameInfo.contains(FI));
       DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
     }
