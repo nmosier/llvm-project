@@ -34,6 +34,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/CodeGen/FunctionPrivateStacks.h"
 
 using namespace llvm;
 
@@ -597,6 +598,12 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
       Reserved.set(*AI);
   }
 
+  // Reserve R15 for a function private stack.
+  if (MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack)) {
+    for (MCRegAliasIterator AI(X86::R15, this, true); AI.isValid(); ++AI) {
+      Reserved.set(*AI);
+    }
+  }
   assert(checkAllSuperRegsMarked(Reserved,
                                  {X86::SIL, X86::DIL, X86::BPL, X86::SPL,
                                   X86::SIH, X86::DIH, X86::BPH, X86::SPH}));

@@ -30,6 +30,7 @@
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/StackLifetime.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -92,9 +93,18 @@ static cl::opt<bool>
     SafeStackUsePointerAddress("safestack-use-pointer-address",
                                   cl::init(false), cl::Hidden);
 
+static cl::opt<bool> SafeStackUnsafeAccesses("safestack-unsafe-accesses",
+                                             cl::init(true), cl::Hidden);
+
+static cl::opt<bool> SafeStackDynamicAllocations("safestack-dynamic-allocations",
+                                                 cl::init(false), cl::Hidden);
+
+static cl::opt<bool> SafeStackRealignments("safestack-realignments",
+                                           cl::init(false), cl::Hidden);
+
 static cl::opt<bool> ClColoring("safe-stack-coloring",
                                 cl::desc("enable safe stack coloring"),
-                                cl::Hidden, cl::init(true));
+                                cl::init(false), cl::Hidden);
 
 namespace {
 
@@ -106,6 +116,7 @@ namespace {
 class SafeStack {
   Function &F;
   const TargetLoweringBase &TL;
+  const TargetFrameLowering &TFL;
   const DataLayout &DL;
   DomTreeUpdater *DTU;
   ScalarEvolution &SE;
@@ -183,9 +194,9 @@ class SafeStack {
   void TryInlinePointerAddress();
 
 public:
-  SafeStack(Function &F, const TargetLoweringBase &TL, const DataLayout &DL,
+  SafeStack(Function &F, const TargetLoweringBase &TL, const TargetFrameLowering &TFL, const DataLayout &DL,
             DomTreeUpdater *DTU, ScalarEvolution &SE)
-      : F(F), TL(TL), DL(DL), DTU(DTU), SE(SE),
+        : F(F), TL(TL), TFL(TFL), DL(DL), DTU(DTU), SE(SE),
         StackPtrTy(DL.getAllocaPtrType(F.getContext())),
         IntPtrTy(DL.getIntPtrType(F.getContext())),
         Int32Ty(Type::getInt32Ty(F.getContext())) {}
@@ -265,6 +276,22 @@ bool SafeStack::IsMemIntrinsicSafe(const MemIntrinsic *MI, const Use &U,
 /// stack or not. The function analyzes all uses of AI and checks whether it is
 /// only accessed in a memory safe way (as decided statically).
 bool SafeStack::IsSafeStackAlloca(const Value *AllocaPtr, uint64_t AllocaSize) {
+  // NHM-TODO: document
+  auto *AI = dyn_cast<AllocaInst>(AllocaPtr);
+  if (SafeStackDynamicAllocations && AI && !AI->isStaticAlloca())
+    return false;
+  
+  // NHM-TODO: docuemnt
+  if (SafeStackRealignments) {
+    if (AI && AI->getAlign() > TFL.getStackAlign())
+      return false;
+    if (auto *Arg = dyn_cast<Argument>(AllocaPtr); Arg && Arg->getType()->isPointerTy() && Arg->hasByValAttr() && Arg->getParamAlign().valueOrOne() > TFL.getStackAlign())
+      report_fatal_error("Byval arguments with alignment greater than the target's default stack alignment is not supported!");
+  }
+  
+  if (!SafeStackUnsafeAccesses)
+    return true;
+  
   // Go through all uses of this alloca and check whether all accesses to the
   // allocated object are statically known to be memory safe and, hence, the
   // object can be placed on the safe stack.
@@ -901,6 +928,9 @@ public:
     auto *TL = TM->getSubtargetImpl(F)->getTargetLowering();
     if (!TL)
       report_fatal_error("TargetLowering instance is required");
+    auto *TFL = TM->getSubtargetImpl(F)->getFrameLowering();
+    if (!TFL)
+      report_fatal_error("TargetFrameLowering instance is required");
 
     auto *DL = &F.getDataLayout();
     auto &TLI = getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(F);
@@ -934,7 +964,7 @@ public:
 
     ScalarEvolution SE(F, TLI, ACT, *DT, LI);
 
-    return SafeStack(F, *TL, *DL, ShouldPreserveDominatorTree ? &DTU : nullptr,
+    return SafeStack(F, *TL, *TFL, *DL, ShouldPreserveDominatorTree ? &DTU : nullptr,
                      SE)
         .run();
   }
@@ -961,6 +991,9 @@ PreservedAnalyses SafeStackPass::run(Function &F,
   auto *TL = TM->getSubtargetImpl(F)->getTargetLowering();
   if (!TL)
     report_fatal_error("TargetLowering instance is required");
+  auto *TFL = TM->getSubtargetImpl(F)->getFrameLowering();
+  if (!TFL)
+    report_fatal_error("TargetFrameLowering instance is required");
 
   auto &DL = F.getDataLayout();
 
@@ -969,7 +1002,7 @@ PreservedAnalyses SafeStackPass::run(Function &F,
   auto &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
   DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Lazy);
 
-  bool Changed = SafeStack(F, *TL, DL, &DTU, SE).run();
+  bool Changed = SafeStack(F, *TL, *TFL, DL, &DTU, SE).run();
 
   if (!Changed)
     return PreservedAnalyses::all();
@@ -988,3 +1021,4 @@ INITIALIZE_PASS_END(SafeStackLegacyPass, DEBUG_TYPE,
                     "Safe Stack instrumentation pass", false, false)
 
 FunctionPass *llvm::createSafeStackPass() { return new SafeStackLegacyPass(); }
+
