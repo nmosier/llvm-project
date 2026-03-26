@@ -41,9 +41,9 @@ protected:
 
   virtual bool checkFrameIndex(const MachineOperand &MO) const = 0;
 
-  virtual void assignRegsForPrivateStackPointer(
+  void assignRegsForPrivateStackPointer(
       MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
-      const DenseMap<int, uint64_t> &PrivateFrameInfo) = 0; // NHM-FIXME: Should be de-virtualized.
+      const DenseMap<int, uint64_t> &PrivateFrameInfo);
 
   virtual void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) = 0; // NHM-FIXME: Should be de-virtualized.
   virtual void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) = 0; // NHM-FIXME: Should be de-virtualized.
@@ -51,6 +51,11 @@ protected:
 
   virtual const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses) = 0; // NHM-FIXME: Should be de-virtualized.
 
+  virtual void loadPrivateStackPointer(
+      MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
+      const DebugLoc &Loc = DebugLoc()) = 0; // NHM-FIXME: De-virtualize.
+
+  virtual void fixupPrivateStackAccess(MachineInstr &MI, const DenseMap<int, uint64_t> &PrivateFrameInfo) = 0;
 
 
 };

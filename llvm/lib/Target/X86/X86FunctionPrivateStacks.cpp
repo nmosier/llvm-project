@@ -76,7 +76,7 @@ private:
   // NOTE: Permits PtrReg == ValReg.
   void loadPrivateStackPointer(MachineBasicBlock &MBB,
                                MachineBasicBlock::iterator MBBI, Register Reg,
-                               const DebugLoc &Loc = DebugLoc());
+                               const DebugLoc &Loc = DebugLoc()) override; // NHM-FIXME: Move to base class.
   void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
                                    Register Reg,
@@ -98,9 +98,9 @@ private:
       SmallVectorImpl<std::pair<MachineBasicBlock *,
                                 MachineBasicBlock::iterator>> &InsertPts);
 
-  void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, const DenseMap<int, uint64_t>& PrivateFrameInfo) override;
   void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) override;
   void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) override;
+  void fixupPrivateStackAccess(MachineInstr &MI, const DenseMap<int, uint64_t> &PrivateFrameInfo) override;
 };
 
 static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, const TargetRegisterClass &RC = X86::GR64RegClass, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
@@ -274,62 +274,6 @@ void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Privat
         .addImm(offsetof_fps_current_frame)
         .addReg(X86::NoRegister)
         .addReg(Regs[1]);
-  }
-}
-
-static bool shouldReloadPSP(const MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI) {
-  const MachineFunction &MF = *MBB.getParent();
-  // Entry block? Needed for LeafFPS (no prologue); FullFPS prologue handles it.
-  if (MF.getFunction().fpsKind() != Function::FullFPS &&
-      &MBB == &MF.front() && MBBI == MBB.begin())
-    return true;
-  // Is EH pad?
-  if (MBB.isEHPad() && MBBI == MBB.begin())
-    return true;
-  // Is post-call?
-  if (MBBI != MBB.begin() && std::prev(MBBI)->isCall() && !std::prev(MBBI)->isReturn())
-    return true;
-
-  return false;
-}
-
-void X86FunctionPrivateStacks::assignRegsForPrivateStackPointer(
-    MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
-    const DenseMap<int, uint64_t> &PrivateFrameInfo) {
-
-  const auto isUse = [&](MachineInstr *MI) { return is_contained(Uses, MI); };
-
-  // Load stack pointer.
-  // Insertion points:
-  // - Post-calls
-  // - Function entrypoint
-  // - Exception blocks
-  for (MachineBasicBlock &MBB : MF) {
-    for (auto MBBI = MBB.begin();; ++MBBI) {
-      if (shouldReloadPSP(MBB, MBBI)) {
-        loadPrivateStackPointer(MBB, MBBI, PSPReg);
-      }
-      if (MBBI == MBB.end())
-        break;
-    }
-  }
-
-  // Fixup uses with PSP reg.
-  for (MachineBasicBlock &MBB : MF) {
-    for (MachineInstr &MI : MBB) {
-      if (!isUse(&MI))
-        continue;
-      const int MemRefIdx = X86::getFirstAddrOperandIdx(MI);
-      assert(MemRefIdx >= 0);
-      MachineOperand &BaseMO = MI.getOperand(MemRefIdx + X86::AddrBaseReg);
-      MachineOperand &DispMO = MI.getOperand(MemRefIdx + X86::AddrDisp);
-      assert(BaseMO.isFI());
-      assert(DispMO.isImm());
-      int FI = BaseMO.getIndex();
-      BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
-      assert(PrivateFrameInfo.contains(FI));
-      DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
-    }
   }
 }
 
@@ -592,6 +536,19 @@ const TargetRegisterClass *X86FunctionPrivateStacks::computeAddrBaseRegClass(
 bool X86FunctionPrivateStacks::checkFrameIndex(const MachineOperand &MO) const {
   const int MemRefBeginIdx = X86::getFirstAddrOperandIdx(*MO.getParent());
   return MemRefBeginIdx >= 0 && MO.getOperandNo() == static_cast<unsigned>(MemRefBeginIdx + X86::AddrBaseReg);
+}
+
+void X86FunctionPrivateStacks::fixupPrivateStackAccess(MachineInstr &MI, const DenseMap<int, uint64_t> &PrivateFrameInfo) {
+  const int MemRefIdx = X86::getFirstAddrOperandIdx(MI);
+  assert(MemRefIdx >= 0);
+  MachineOperand &BaseMO = MI.getOperand(MemRefIdx + X86::AddrBaseReg);
+  MachineOperand &DispMO = MI.getOperand(MemRefIdx + X86::AddrDisp);
+  assert(BaseMO.isFI());
+  assert(DispMO.isImm());
+  int FI = BaseMO.getIndex();
+  BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
+  assert(PrivateFrameInfo.contains(FI));
+  DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
 }
 
 } // end namespace

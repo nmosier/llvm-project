@@ -163,3 +163,47 @@ bool TargetFunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, Mac
   }
   return true;
 }
+
+static bool shouldReloadPSP(const MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI) {
+  const MachineFunction &MF = *MBB.getParent();
+  // Entry block? Needed for LeafFPS (no prologue); FullFPS prologue handles it.
+  if (MF.getFunction().fpsKind() != Function::FullFPS &&
+      &MBB == &MF.front() && MBBI == MBB.begin())
+    return true;
+  // Is EH pad?
+  if (MBB.isEHPad() && MBBI == MBB.begin())
+    return true;
+  // Is post-call?
+  if (MBBI != MBB.begin() && std::prev(MBBI)->isCall() && !std::prev(MBBI)->isReturn())
+    return true;
+
+  return false;
+}
+
+void TargetFunctionPrivateStacks::assignRegsForPrivateStackPointer(
+    MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
+    const DenseMap<int, uint64_t> &PrivateFrameInfo) {
+
+  const auto isUse = [&](MachineInstr *MI) { return is_contained(Uses, MI); };
+
+  // Load stack pointer.
+  // Insertion points:
+  // - Post-calls
+  // - Function entrypoint
+  // - Exception blocks
+  for (MachineBasicBlock &MBB : MF) {
+    for (auto MBBI = MBB.begin();; ++MBBI) {
+      if (shouldReloadPSP(MBB, MBBI)) {
+        loadPrivateStackPointer(MBB, MBBI, PSPReg);
+      }
+      if (MBBI == MBB.end())
+        break;
+    }
+  }
+
+  // Fixup uses with PSP reg.
+  for (MachineBasicBlock &MBB : MF)
+    for (MachineInstr &MI : MBB)
+      if (isUse(&MI))
+        fixupPrivateStackAccess(MI, PrivateFrameInfo);
+}
