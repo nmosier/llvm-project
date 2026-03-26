@@ -599,6 +599,7 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   }
 
   // Reserve R15 for a function private stack.
+  // NHM-FIXME: Use shared def of X86::R15.
   if (MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack)) {
     for (MCRegAliasIterator AI(X86::R15, this, true); AI.isValid(); ++AI) {
       Reserved.set(*AI);
