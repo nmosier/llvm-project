@@ -8,21 +8,29 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/Pass.h"
 
-#define DEBUG_TYPE "fps"
+#define PASS_KEY "fps"
+#define DEBUG_TYPE PASS_KEY
 
 using namespace llvm;
 
 namespace llvm {
 
 // NHM-FIXME: Fixup flags.
-cl::opt<bool> EnableLeafFPS("x86-function-private-stacks-leaf", cl::init(true),
+cl::opt<bool> EnableLeafFPS(PASS_KEY "-leaf", cl::init(true),
                             cl::Hidden);
 STATISTIC(FullFPSCount, "Number of functions with a full FPS");
 STATISTIC(LeafFPSCount, "Number of functions with a leaf FPS");
+
+cl::opt<bool> EnableFPSStrictMode(
+    PASS_KEY "-strict", cl::init(false), cl::Hidden,
+    cl::desc("Enable strict mode for function private stacks, which enforces "
+             "that security requirements are met."));
+
 } // namespace llvm
 
                                                                     

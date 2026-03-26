@@ -20,6 +20,7 @@
 #include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/CodeGen/RegAllocPBQP.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
+#include "llvm/CodeGen/TargetFunctionPrivateStacks.h"
 
 using namespace llvm;
 
@@ -35,11 +36,7 @@ cl::opt<bool> EnableOverflowChecks(
     cl::init(false),
     cl::Hidden);
 
-cl::opt<bool> EnableStrictMode(PASS_KEY "-strict",
-                               cl::desc("Enable strict mode, which enforces "
-                                        "that security requirements are met"),
-                               cl::init(false),
-                               cl::Hidden);
+// NHM-FIXME: Make this a shared flag and move to the CodeGen pass.
 
 // NHM-FIXME: Move to more sane location.
 // NHM-FIXME: Make structs for these.
@@ -52,30 +49,26 @@ static constexpr MCPhysReg PSPReg = X86::R15;
 // NHM-FIXME: This must be implemented somewhere.
 // NHM-FIXME: use llvm::alignTo
 template <typename T>
-T align_up(T value, T align) {
+T align_up(T value, T   align) {
   return ((value + align - 1) / align) * align;
 }
 
-class X86FunctionPrivateStacks : public MachineFunctionPass {
+class X86FunctionPrivateStacks final : public TargetFunctionPrivateStacks {
 public:
   static char ID;
 
-  X86FunctionPrivateStacks() : MachineFunctionPass(ID) {
+  X86FunctionPrivateStacks() : TargetFunctionPrivateStacks(ID, X86::R15) {
     initializeX86FunctionPrivateStacksPass(*PassRegistry::getPassRegistry());
   }
 
-  bool runOnMachineFunction(MachineFunction &MF) override;
-
 private:
-  const TargetMachine *TM;
-  const TargetInstrInfo *TII;
-  const X86RegisterInfo *TRI;
-  MachineFrameInfo *MFI;
-  MachineRegisterInfo *MRI;
-  GlobalVariable *FPSSym;
-  const GlobalVariable *StackIdxSym;
-  const GlobalVariable *ThdStacksSym;
-  GlobalVariable *FrameSizeSym;
+  const TargetMachine *TM; // NHM-FIXME: Remove?
+
+  bool hasBasePointer(const MachineFunction &MF) const override {
+    return static_cast<const X86RegisterInfo *>(TRI)->hasBasePointer(MF);
+  }
+
+  bool checkFrameIndex(const MachineOperand &MO) const override;
 
   // NHM-FIXME: No longer need pointer to member.
   void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalVariable *Member, Register Reg);
@@ -91,17 +84,13 @@ private:
   void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
                                    Register Reg, const DebugLoc &Loc);
-  const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses);
+  const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses) override;
 
 
   // NOTE: Does not permit PtrReg == ValReg.
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
 
-  bool frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses);
-  uint64_t collectPrivateFrameObjects(MachineFunction &MF,
-                                      DenseMap<int, uint64_t> &PrivateFrameInfo,
-                                      SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses);
-  bool instrumentSetjmps(MachineFunction &MF);
+  bool instrumentSetjmps(MachineFunction &MF) override;
 
   void partialRedundancyElimination(
       MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
@@ -109,11 +98,9 @@ private:
       SmallVectorImpl<std::pair<MachineBasicBlock *,
                                 MachineBasicBlock::iterator>> &InsertPts);
 
-  void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, const DenseMap<int, uint64_t>& PrivateFrameInfo);
-  // NHM-OPT: Could make it a fixed-size stack frame at first, set a flag in a thread-local variable __fps_stacktypes.
-  void emitRegStack(MachineFunction &MF);
-  void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
-  void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);
+  void assignRegsForPrivateStackPointer(MachineFunction &MF, ArrayRef<MachineInstr *> Uses, const DenseMap<int, uint64_t>& PrivateFrameInfo) override;
+  void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) override;
+  void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) override;
 };
 
 static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, const TargetRegisterClass &RC = X86::GR64RegClass, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
@@ -415,24 +402,6 @@ void X86FunctionPrivateStacks::loadPrivateStackPointer(
   }
 }
 
-bool X86FunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF, SmallVectorImpl<MachineOperand *> &Uses) {
-  for (MachineBasicBlock &MBB : MF) {
-    for (MachineInstr &MI : MBB) {
-      for (MachineOperand &MO : MI.operands()) {
-        if (!(MO.isFI() && MO.getIndex() == FI))
-          continue;
-        const int MemRefBeginIdx = X86::getFirstAddrOperandIdx(MI);
-        if (MemRefBeginIdx < 0)
-          return false;
-        if (MO.getOperandNo() != static_cast<unsigned>(MemRefBeginIdx))
-          return false;
-        Uses.push_back(&MO);
-      }
-    }
-  }
-  return true;
-}
-
 void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalVariable *Member, Register Reg) {
   // MOV reg, [rip+gottpoff(__fps_thd_stackptrs@gottpoff)]
   // MOV reg, fs:[reg]
@@ -620,144 +589,9 @@ const TargetRegisterClass *X86FunctionPrivateStacks::computeAddrBaseRegClass(
   return RC;
 }
 
-uint64_t X86FunctionPrivateStacks::collectPrivateFrameObjects(
-    MachineFunction &MF, DenseMap<int, uint64_t> &PrivateFrameInfo,
-    SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses) {
-  uint64_t PrivateFrameSize = 0;
-  Align PrivateFrameAlign;
-  for (int FI = MFI->getObjectIndexBegin(); FI < MFI->getObjectIndexEnd(); ++FI) {
-    if (MFI->isFixedObjectIndex(FI))
-      continue;
-    SmallVector<MachineOperand *> Uses;
-    if (!frameIndexOnlyUsedInMemoryOperands(FI, MF, Uses)) {
-      LLVM_DEBUG(dbgs() << "skipping frame index " << FI << " which has a non-memory-operand use\n");
-      continue;
-    }
-    if (Uses.empty())
-      continue;
-
-    const TargetRegisterClass *RC = computeAddrBaseRegClass(Uses);
-    if (RC != &X86::GR64RegClass) {
-      LLVM_DEBUG(dbgs() << "skipping frame index " << FI
-                        << " which uses non-REX addressing\n");
-      continue;
-    }
-
-    Align ObjAlign = MFI->getObjectAlign(FI);
-    PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
-    PrivateFrameSize = llvm::alignTo(PrivateFrameSize, ObjAlign);
-    PrivateFrameInfo[FI] = PrivateFrameSize;
-    assert(MFI->getObjectSize(FI) > 0);
-    PrivateFrameSize += MFI->getObjectSize(FI);
-
-    for (MachineOperand *UseOp : Uses) {
-      MachineInstr *MI = UseOp->getParent();
-      PrivateFrameAccesses.push_back(MI);
-    }
-  }
-  return llvm::alignTo(PrivateFrameSize, PrivateFrameAlign);
-}
-
-bool X86FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
-  // Bail if the function doesn't have a `privatestack` attribute.
-  if (!MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack)) {
-    return false;
-  }
-  assert(!MF.getName().starts_with("__fps_"));
-
-  // NHM-FIXME: Remove this debug check.
-  for (const MachineBasicBlock &MBB : MF)
-    for (const MachineInstr &MI : MBB)
-      for (const MachineOperand &MO : MI.operands())
-        if (MO.isReg())
-          assert(MO.getReg() != PSPReg); 
-  
-  TM = &MF.getTarget();
-
-  Function &F = MF.getFunction();
-  Module &M = *F.getParent();
-  LLVMContext &Ctx = M.getContext();
-  
-  // For now, simply verify that stack realignment is not required,
-  // and that we only need a stack pointer, not a base pointer or frame pointer.
-  auto &STI = MF.getSubtarget<X86Subtarget>();
-  TII = STI.getInstrInfo();
-  TRI = STI.getRegisterInfo();
-  MFI = &MF.getFrameInfo();
-  MRI = &MF.getRegInfo();
-
-  // NHM-FIXME: Make it an assert?
-  // NHM-FIXME: Why was this disabled? Minimally, we should check if SafeStack
-  // was enabled (it's a function attribute).
-  if (EnableStrictMode) {
-    assert(!TRI->hasBasePointer(MF) && "No function should have a base pointer!");
-    assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
-  }
-
-  // NHM-TODO: Probably should just move these to a full-fps-specific area.
-  StackIdxSym = cast_or_null<GlobalVariable>(M.getNamedValue(("__fps_stackidx_" + MF.getName()).str()));
-  ThdStacksSym =
-      cast_or_null<GlobalVariable>(M.getNamedValue("__fps_thd_stacks"));
-  FrameSizeSym = cast_or_null<GlobalVariable>(
-      M.getNamedValue(("__fps_framesize_" + MF.getName()).str()));
-  switch (F.fpsKind()) {
-  case Function::FullFPS:
-    assert(FrameSizeSym && StackIdxSym && ThdStacksSym);
-    break;
-  case Function::LeafFPS:
-    break;
-  default:
-    report_fatal_error("unhandled FPS kind");
-  }
-
-  DebugLoc Loc;
-
-  DenseMap<int, uint64_t> PrivateFrameInfo;
-  SmallVector<MachineInstr *> PrivateFrameAccesses;
-  uint64_t PrivateFrameSize =
-      collectPrivateFrameObjects(MF, PrivateFrameInfo, PrivateFrameAccesses);
-
-  if (PrivateFrameSize == 0) {
-    // NHM-TODO: It turns out we actually didn't to reserve the PSP register
-    // (currently R15). This means that, in theory, we could un-spill some registers.
-    return false;
-  }
-
-  // LeafFPS: Create the stack frame.
-  if (F.fpsKind() == Function::LeafFPS) {
-    auto *Int8Ty = IntegerType::get(Ctx, 8);
-    auto *ArrTy = ArrayType::get(Int8Ty, PrivateFrameSize);
-    auto *ArrVal = Constant::getNullValue(ArrTy);
-    FPSSym = new GlobalVariable(
-        M, ArrTy, /*isConstant*/ false, GlobalVariable::InternalLinkage, ArrVal,
-        "__fps_stackframe_" + F.getName(),
-        /*InsertBefore*/ nullptr, GlobalVariable::InitialExecTLSModel);
-    // NHM-FIXME: ^ This should be local dynamic TLS model, not initial exec,
-    // ideally. Need to figure out how to integrate use of __tls_get_addr().
-  }
-
-  // Collect restore points for stack pointer.
-  assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses, PrivateFrameInfo);
-  if (F.fpsKind() == Function::FullFPS) {
-    emitPrologue(MF, PrivateFrameSize);
-    emitEpilogue(MF, PrivateFrameSize);
-  }
-
-  // Erase unused stack slots.
-  for (const auto &[FI, _] : PrivateFrameInfo)
-    MFI->RemoveStackObject(FI);
-
-  MF.verify();
-
-  instrumentSetjmps(MF);
-
-  // Update frame size symbol with the correct constant.
-  if (FrameSizeSym) {
-    FrameSizeSym->setInitializer(ConstantInt::get(
-        IntegerType::get(M.getContext(), 64), PrivateFrameSize));
-  }
-
-  return true;
+bool X86FunctionPrivateStacks::checkFrameIndex(const MachineOperand &MO) const {
+  const int MemRefBeginIdx = X86::getFirstAddrOperandIdx(*MO.getParent());
+  return MemRefBeginIdx >= 0 && MO.getOperandNo() == static_cast<unsigned>(MemRefBeginIdx + X86::AddrBaseReg);
 }
 
 } // end namespace

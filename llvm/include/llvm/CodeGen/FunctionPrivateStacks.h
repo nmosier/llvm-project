@@ -6,7 +6,7 @@
 
 namespace llvm {
 
-extern cl::opt<bool> EnableFunctionPrivateStacks;
+extern cl::opt<bool> EnableFPSStrictMode;
 
 class FunctionPrivateStacksPass : public PassInfoMixin<FunctionPrivateStacksPass> {
 public:
@@ -14,6 +14,6 @@ public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM); // NHM-TODO: Implement.
 };
 
-}
+} // end namespace llvm
 
 #endif
