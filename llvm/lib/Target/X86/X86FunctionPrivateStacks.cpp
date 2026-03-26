@@ -57,7 +57,7 @@ class X86FunctionPrivateStacks final : public TargetFunctionPrivateStacks {
 public:
   static char ID;
 
-  X86FunctionPrivateStacks() : TargetFunctionPrivateStacks(ID, X86::R15) {
+  X86FunctionPrivateStacks() : TargetFunctionPrivateStacks(ID, X86::R15, X86::EFLAGS) {
     initializeX86FunctionPrivateStacksPass(*PassRegistry::getPassRegistry());
   }
 
@@ -73,31 +73,18 @@ private:
   // NHM-FIXME: No longer need pointer to member.
   void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalVariable *Member, Register Reg);
 
-  // NOTE: Permits PtrReg == ValReg.
-  void loadPrivateStackPointer(MachineBasicBlock &MBB,
-                               MachineBasicBlock::iterator MBBI, Register Reg,
-                               const DebugLoc &Loc = DebugLoc()) override; // NHM-FIXME: Move to base class.
   void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
                                    Register Reg,
-                                   const DebugLoc &Loc);
+                                   const DebugLoc &Loc) override;
   void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
-                                   Register Reg, const DebugLoc &Loc);
-  const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses) override;
-
+                                   Register Reg, const DebugLoc &Loc) override;
 
   // NOTE: Does not permit PtrReg == ValReg.
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
 
   bool instrumentSetjmps(MachineFunction &MF) override;
-
-  void partialRedundancyElimination(
-      MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
-      ArrayRef<MachineInstr *> Kills,
-      SmallVectorImpl<std::pair<MachineBasicBlock *,
-                                MachineBasicBlock::iterator>> &InsertPts);
-
   void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) override;
   void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) override;
   void fixupPrivateStackAccess(MachineInstr &MI, const DenseMap<int, uint64_t> &PrivateFrameInfo) override;
@@ -313,39 +300,6 @@ void X86FunctionPrivateStacks::loadPrivateStackPointerFull(
       .addReg(X86::NoRegister);
 }
 
-void X86FunctionPrivateStacks::loadPrivateStackPointer(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
-    const DebugLoc &Loc) {
-  const MachineFunction &MF = *MBB.getParent();
-  const Function &F = MF.getFunction();
-
-  // NHM-TODO: Make this an EXPENSIVE_CHECKS?
-#ifndef NDEBUG
-  LivePhysRegs LPR(*TRI);
-  LPR.addLiveOuts(MBB);
-  for (MachineInstr &MI : reverse(MBB)) {
-    LPR.stepBackward(MI);
-    if (MI.getIterator() == MBBI)
-      break;
-  }
-  assert(LPR.available(*MRI, Reg) || MRI->isReserved(Reg));
-  const bool LiveEFLAGS = LPR.contains(X86::EFLAGS);
-  assert(!LiveEFLAGS && "Expected no live EFLAGS under new approach!");
-#endif
-
-  // Normal case: no live EFLAGS.
-  switch (F.fpsKind()) {
-  case Function::FullFPS:
-    loadPrivateStackPointerFull(MBB, MBBI, Reg, Loc);
-    break;
-  case Function::LeafFPS:
-    loadPrivateStackPointerLeaf(MBB, MBBI, Reg, Loc);
-    break;
-  default:
-    report_fatal_error("unhandled FPS type");
-  }
-}
-
 void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalVariable *Member, Register Reg) {
   // MOV reg, [rip+gottpoff(__fps_thd_stackptrs@gottpoff)]
   // MOV reg, fs:[reg]
@@ -513,24 +467,6 @@ bool X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
 
 
   return true;
-}
-
-const TargetRegisterClass *X86FunctionPrivateStacks::computeAddrBaseRegClass(
-    ArrayRef<const MachineOperand *> Uses) {
-  const TargetRegisterClass *RC = &X86::GR64RegClass;
-  for (const MachineOperand *MO : Uses) {
-    const MachineInstr &MI = *MO->getParent();
-    const TargetRegisterClass *ThisRC = MI.getRegClassConstraint(
-        X86::getFirstAddrOperandIdx(MI), TII, TRI);
-    if (ThisRC->hasSuperClass(RC)) {
-      RC = ThisRC;
-    } else if (ThisRC->hasSubClassEq(RC)) {
-      // Skip.
-    } else {
-      report_fatal_error("Expected RC with sub/superset containment!");
-    }
-  }
-  return RC;
 }
 
 bool X86FunctionPrivateStacks::checkFrameIndex(const MachineOperand &MO) const {

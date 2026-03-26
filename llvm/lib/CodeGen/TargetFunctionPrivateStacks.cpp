@@ -1,5 +1,7 @@
 #include "llvm/CodeGen/TargetFunctionPrivateStacks.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/CodeGen/FunctionPrivateStacks.h"
@@ -7,6 +9,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/CodeGen/LivePhysRegs.h"
 
 #define DEBUG_TYPE "target-fps"
 
@@ -127,8 +130,13 @@ uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
     if (Uses.empty())
       continue;
 
-    const TargetRegisterClass *RC = computeAddrBaseRegClass(Uses);
-    if (!RC->contains(PSPReg)) {
+    auto CompatibleUse = [&](const MachineOperand *MO) -> bool {
+      const MachineInstr &MI = *MO->getParent();
+      const TargetRegisterClass *RC =
+          MI.getRegClassConstraint(MO->getOperandNo(), TII, TRI);
+      return RC->contains(PSPReg);
+    };
+    if (!llvm::all_of(Uses, CompatibleUse)) {
       LLVM_DEBUG(dbgs() << "skipping frame index " << FI
                         << " since the PSP reg has an incompatible class\n");
       continue;
@@ -184,7 +192,7 @@ void TargetFunctionPrivateStacks::assignRegsForPrivateStackPointer(
     MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
     const DenseMap<int, uint64_t> &PrivateFrameInfo) {
 
-  const auto isUse = [&](MachineInstr *MI) { return is_contained(Uses, MI); };
+  const auto IsUse = [&](MachineInstr *MI) { return is_contained(Uses, MI); };
 
   // Load stack pointer.
   // Insertion points:
@@ -204,6 +212,56 @@ void TargetFunctionPrivateStacks::assignRegsForPrivateStackPointer(
   // Fixup uses with PSP reg.
   for (MachineBasicBlock &MBB : MF)
     for (MachineInstr &MI : MBB)
-      if (isUse(&MI))
+      if (IsUse(&MI))
         fixupPrivateStackAccess(MI, PrivateFrameInfo);
+}
+
+const TargetRegisterClass *TargetFunctionPrivateStacks::computeAddrBaseRegClass(
+    ArrayRef<const MachineOperand *> Uses) const {
+  const TargetRegisterClass *RC = TRI->getMinimalPhysRegClass(PSPReg);
+  for (const MachineOperand *MO : Uses) {
+    const MachineInstr &MI = *MO->getParent();
+    const TargetRegisterClass *ThisRC = MI.getRegClassConstraint(MO->getOperandNo(), TII, TRI);
+    if (ThisRC->hasSuperClass(RC)) {
+      RC = ThisRC;
+    } else if (ThisRC->hasSubClassEq(RC)) {
+      // Skip.
+    } else {
+      report_fatal_error("Expected RC with sub/superset containment!");
+    }
+  }
+  return RC;
+}
+
+void TargetFunctionPrivateStacks::loadPrivateStackPointer(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
+    const DebugLoc &Loc) {
+  const MachineFunction &MF = *MBB.getParent();
+  const Function &F = MF.getFunction();
+
+  // NHM-TODO: Make this an EXPENSIVE_CHECKS?
+#ifndef NDEBUG
+  LivePhysRegs LPR(*TRI);
+  LPR.addLiveOuts(MBB);
+  for (MachineInstr &MI : reverse(MBB)) {
+    LPR.stepBackward(MI);
+    if (MI.getIterator() == MBBI)
+      break;
+  }
+  assert(LPR.available(*MRI, Reg) || MRI->isReserved(Reg));
+  const bool LiveEFLAGS = LPR.contains(FlagsReg);
+  assert(!LiveEFLAGS && "Expected no live EFLAGS under new approach!");
+#endif
+
+  // Normal case: no live EFLAGS.
+  switch (F.fpsKind()) {
+  case Function::FullFPS:
+    loadPrivateStackPointerFull(MBB, MBBI, Reg, Loc);
+    break;
+  case Function::LeafFPS:
+    loadPrivateStackPointerLeaf(MBB, MBBI, Reg, Loc);
+    break;
+  default:
+    report_fatal_error("unhandled FPS type");
+  }
 }

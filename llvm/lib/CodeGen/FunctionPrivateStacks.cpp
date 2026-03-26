@@ -1,17 +1,17 @@
 #include "llvm/CodeGen/FunctionPrivateStacks.h" // NHM-TODO: Maybe don't need this?
 
 #include "llvm/ADT/Statistic.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/GlobalVariable.h"
-#include "llvm/IR/Module.h"
-#include "llvm/InitializePasses.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Module.h"
+#include "llvm/InitializePasses.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
-#include "llvm/Pass.h"
 
 #define PASS_KEY "fps"
 #define DEBUG_TYPE PASS_KEY
@@ -40,7 +40,6 @@ namespace {
 class FunctionPrivateStacks {
   Module &M;
   LLVMContext &Ctx;
-  bool Changed;
   IntegerType *Int64Ty;
   PointerType *PtrTy;
   StructType *RegInfoTy;
@@ -51,7 +50,7 @@ class FunctionPrivateStacks {
   GlobalVariable *createFrameSize(Function &F);
   
 public:
-  FunctionPrivateStacks(Module &M) : M(M), Ctx(M.getContext()), Changed(false) {}
+  FunctionPrivateStacks(Module &M) : M(M), Ctx(M.getContext()) {}
   bool run();
 };
 
