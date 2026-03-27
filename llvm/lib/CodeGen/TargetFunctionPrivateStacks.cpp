@@ -12,10 +12,41 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCRegister.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #define DEBUG_TYPE "target-fps"
 
 using namespace llvm;
+
+static void getLiveRegsAt(const MachineBasicBlock &MBB,
+                          MachineBasicBlock::const_iterator MBBI,
+                          LivePhysRegs &LPR) {
+  LPR.addLiveOuts(MBB);
+  for (const MachineInstr &MI : reverse(MBB)) {
+    LPR.stepBackward(MI);
+    if (MI.getIterator() == MBBI)
+      return;
+  }
+}
+
+MCPhysReg TargetFunctionPrivateStacks::getScratchReg(
+    const LivePhysRegs &LPR, ArrayRef<MCPhysReg> Blacklist) const {
+  for (MCPhysReg Reg : ScratchRC) {
+    if (LPR.available(*MRI, Reg) && !is_contained(Blacklist, Reg)) {
+      assert(Reg != PSPReg);
+      return Reg;
+    }
+  }
+  report_fatal_error("No scratch register found");
+}
+
+MCPhysReg TargetFunctionPrivateStacks::getScratchReg(
+    const MachineBasicBlock &MBB, MachineBasicBlock::const_iterator MBBI,
+    ArrayRef<MCPhysReg> Blacklist) const {
+  LivePhysRegs LPR(*TRI);
+  getLiveRegsAt(MBB, MBBI, LPR);
+  return getScratchReg(LPR, Blacklist);
+}
 
 bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   if (!MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack))
@@ -243,12 +274,7 @@ void TargetFunctionPrivateStacks::loadPrivateStackPointer(
   // NHM-TODO: Make this an EXPENSIVE_CHECKS?
 #ifndef NDEBUG
   LivePhysRegs LPR(*TRI);
-  LPR.addLiveOuts(MBB);
-  for (MachineInstr &MI : reverse(MBB)) {
-    LPR.stepBackward(MI);
-    if (MI.getIterator() == MBBI)
-      break;
-  }
+  getLiveRegsAt(MBB, MBBI, LPR);
   assert(LPR.available(*MRI, Reg) || MRI->isReserved(Reg));
   const bool LiveEFLAGS = LPR.contains(FlagsReg);
   assert(!LiveEFLAGS && "Expected no live EFLAGS under new approach!");
@@ -267,13 +293,6 @@ void TargetFunctionPrivateStacks::loadPrivateStackPointer(
   }
 }
 
-static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, const TargetRegisterClass &RC) {
-  for (MCPhysReg Reg : RC)
-    if (LPR.available(MRI, Reg) )
-      return Reg;
-  return MCRegister::NoRegister;
-}
-
 void TargetFunctionPrivateStacks::emitPrologue(MachineFunction &MF,
                                                unsigned PrivateFrameSize) {
   assert(PrivateFrameSize > 0);
@@ -285,9 +304,7 @@ void TargetFunctionPrivateStacks::emitPrologue(MachineFunction &MF,
   // of the FPS linked list of stack frames.
   LivePhysRegs LPR(*TRI);
   LPR.addLiveIns(EntryMBB);
-  MCPhysReg ScratchReg = getFreeReg(LPR, *MRI, ScratchRC);
-  if (ScratchReg == MCRegister::NoRegister)
-    report_fatal_error("Failed to get free scratch register for FPS prologue!");
+  MCPhysReg ScratchReg = getScratchReg(LPR);
 
   // Make sure EFLAGS isn't live-in to the function, as we will clobber it.
   assert(!LPR.contains(FlagsReg));
@@ -363,9 +380,7 @@ void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Pri
     LPR.addLiveOuts(MBB);
     LPR.stepBackward(MBB.back());
     assert(!LPR.contains(FlagsReg));
-    MCPhysReg ScratchReg = getFreeReg(LPR, *MRI, ScratchRC);
-    if (ScratchReg == MCRegister::NoRegister)
-      report_fatal_error("Failed to get scratch register for FPS epilogue!");
+    MCPhysReg ScratchReg = getScratchReg(LPR);
     std::array<MCPhysReg, 2> Regs = {ScratchReg, PSPReg};
 
     emitEpilogueImpl(MBB, MBBI, Regs);
@@ -385,8 +400,14 @@ void TargetFunctionPrivateStacks::fixupPrivateStackAccess(
 }
 
 void TargetFunctionPrivateStacks::loadPrivateStackPointerFull(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg) const {
-
-  getPointerToFPSData(MBB, MBBI, ThdStacksSym, Reg, MCRegister::NoRegister);
-  loadRegFromBaseReg(MBB, MBBI, Reg, Reg);
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    Register DestReg) const {  
+  MCPhysReg ScratchReg = MCRegister::NoRegister;
+  if (needScratchForPointerToFPSData()) {
+    LivePhysRegs LPR(*TRI);
+    getLiveRegsAt(MBB, MBBI, LPR);
+    ScratchReg = getScratchReg(MBB, MBBI);
+  }
+  getPointerToFPSData(MBB, MBBI, ThdStacksSym, DestReg, ScratchReg);
+  loadRegFromBaseReg(MBB, MBBI, DestReg, DestReg);
 }

@@ -41,8 +41,6 @@ constexpr int offsetof_fps_current_frame = 0; // offsetof(fps_t, current_frame)
 constexpr int offsetof_frame_prev = -16; // offsetof(frame_t, prev)
 constexpr int offsetof_frame_next = -8; // offsetof(frame_t, next)
 
-static constexpr MCPhysReg PSPReg = X86::R15;
-
 // NHM-FIXME: This must be implemented somewhere.
 // NHM-FIXME: use llvm::alignTo
 template <typename T>

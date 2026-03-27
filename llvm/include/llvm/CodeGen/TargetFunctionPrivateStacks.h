@@ -9,6 +9,8 @@
 
 namespace llvm {
 
+class LivePhysRegs;
+
 class TargetFunctionPrivateStacks : public MachineFunctionPass {
 protected:
   const MCPhysReg PSPReg;
@@ -89,9 +91,15 @@ protected:
                                    const GlobalVariable *Member,
                                    MCPhysReg DestReg,
                                    MCPhysReg ScratchReg) const = 0;
-  void loadPrivateStackPointerFull(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg) const;
+  void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
+                                   MachineBasicBlock::iterator MBBI,
+                                   Register Reg) const;
 
+  MCPhysReg getScratchReg(const LivePhysRegs &LPR,
+                          ArrayRef<MCPhysReg> Blacklist = {}) const;
+  MCPhysReg getScratchReg(const MachineBasicBlock &MBB,
+                          MachineBasicBlock::const_iterator MBBI,
+                          ArrayRef<MCPhysReg> Blacklist = {}) const;
 };
 
 } // namespace llvm 

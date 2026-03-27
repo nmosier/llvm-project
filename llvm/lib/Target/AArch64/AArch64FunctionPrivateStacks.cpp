@@ -5,6 +5,7 @@
 #include "AArch64Subtarget.h"
 #include "MCTargetDesc/AArch64MCTargetDesc.h"
 #include "Utils/AArch64BaseInfo.h"
+#include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -96,6 +97,10 @@ private:
                            MachineBasicBlock::iterator MBBI,
                            const GlobalVariable *Member, MCPhysReg DestReg,
                            MCPhysReg ScratchReg) const override;
+
+  void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
+                                   MachineBasicBlock::iterator MBBI,
+                                   Register Reg) override;
 };
 
 } // namespace
@@ -138,6 +143,48 @@ void AArch64FunctionPrivateStacks::getPointerToFPSData(
                         AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
   BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADDXrr), DestReg)
       .addReg(DestReg)
+      .addReg(ScratchReg);
+}
+
+void AArch64FunctionPrivateStacks::loadPrivateStackPointerLeaf(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg) {
+
+  // AArch64 equivalent of the X86 initial-exec TLS load:
+  //   adrp scratch, :gottpoff:FPSSym@page
+  //   ldr  Reg,    [scratch, :gottpoff_lo12:FPSSym]  ; TLS offset of FPSSym
+  //   mrs  scratch, tpidr_el0                         ; thread pointer (== fs:[0] on x86)
+  //   add  Reg,    Reg, scratch                       ; TLS address of FPSSym
+
+  // Find a free scratch register.
+  // NHM-FIXME: This should be shared with TargetFPS's code.
+  LivePhysRegs LPR(*TRI);
+  LPR.addLiveOuts(MBB);
+  for (auto It = MBB.rbegin(); It != MBB.rend(); ++It) {
+    LPR.stepBackward(*It);
+    if (It->getIterator() == MBBI)
+      break;
+  }
+  MCPhysReg ScratchReg = MCRegister::NoRegister;
+  for (MCPhysReg R : AArch64::GPR64RegClass) {
+    if (LPR.available(*MRI, R) && R != Reg) {
+      ScratchReg = R;
+      break;
+    }
+  }
+  assert(ScratchReg != MCRegister::NoRegister &&
+         "No scratch register available for loadPrivateStackPointerLeaf");
+
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADRP), ScratchReg)
+      .addGlobalAddress(FPSSym, 0, AArch64II::MO_TLS | AArch64II::MO_PAGE);
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDRXui), Reg)
+      .addReg(ScratchReg)
+      .addGlobalAddress(FPSSym, 0,
+                        AArch64II::MO_TLS | AArch64II::MO_PAGEOFF |
+                            AArch64II::MO_NC);
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::MRS), ScratchReg)
+      .addImm(AArch64SysReg::TPIDR_EL0);
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADDXrr), Reg)
+      .addReg(Reg)
       .addReg(ScratchReg);
 }
 
