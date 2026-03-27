@@ -1,6 +1,7 @@
 #ifndef LLVM_CODEGEN_FUNCTIONPRIVATESTACKSMIR_H
 #define LLVM_CODEGEN_FUNCTIONPRIVATESTACKSMIR_H
 
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
@@ -11,8 +12,11 @@ namespace llvm {
 class TargetFunctionPrivateStacks : public MachineFunctionPass {
 protected:
   const MCPhysReg PSPReg;
+  const MCPhysReg FlagsReg;
+  const TargetRegisterClass &ScratchRC;
 
-  TargetFunctionPrivateStacks(char &ID, MCPhysReg PSPReg) : MachineFunctionPass(ID), PSPReg(PSPReg) {}
+  TargetFunctionPrivateStacks(char &ID, MCPhysReg PSPReg, MCPhysReg FlagsReg, const TargetRegisterClass &ScratchRC)
+      : MachineFunctionPass(ID), PSPReg(PSPReg), FlagsReg(FlagsReg), ScratchRC(ScratchRC) {}
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
@@ -45,21 +49,38 @@ protected:
       MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
       const DenseMap<int, uint64_t> &PrivateFrameInfo);
 
-  virtual void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize) = 0; // NHM-FIXME: Should be de-virtualized.
+  void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
   virtual void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) = 0; // NHM-FIXME: Should be de-virtualized.
   virtual bool instrumentSetjmps(MachineFunction &MF) = 0; // NHM-FIXME: Should be de-virtualized.
 
-  virtual const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses) = 0; // NHM-FIXME: Should be de-virtualized.
+  const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses) const;
 
-  virtual void loadPrivateStackPointer(
+  void loadPrivateStackPointer(
       MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
-      const DebugLoc &Loc = DebugLoc()) = 0; // NHM-FIXME: De-virtualize.
+      const DebugLoc &Loc = DebugLoc());
 
-  virtual void fixupPrivateStackAccess(MachineInstr &MI, const DenseMap<int, uint64_t> &PrivateFrameInfo) = 0;
+  virtual void
+  fixupPrivateStackAccess(MachineInstr &MI,
+                          const DenseMap<int, uint64_t> &PrivateFrameInfo) = 0;
 
+  virtual void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
+                                   MachineBasicBlock::iterator MBBI,
+                                   Register Reg,
+                                   const DebugLoc &Loc) = 0;
+  virtual void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
+                                           MachineBasicBlock::iterator MBBI,
+                                           Register Reg,
+                                           const DebugLoc &Loc) = 0;
 
+  virtual void emitPrologueCheck(MachineBasicBlock &CheckMBB,
+                                 std::array<MCPhysReg, 2> Regs,
+                                 unsigned PrivateFrameSize) = 0;
+  virtual void emitPrologueAlloc(MachineBasicBlock &AllocMBB,
+                                 std::array<MCPhysReg, 2> Regs,
+                                 const uint32_t *RegMask) = 0;
+  virtual MachineOperand getCondEqualMO() const = 0;
 };
 
-}
+} // namespace llvm 
 
 #endif

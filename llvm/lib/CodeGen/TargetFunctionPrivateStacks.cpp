@@ -10,6 +10,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
+#include "llvm/MC/MCRegister.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
 
 #define DEBUG_TYPE "target-fps"
 
@@ -264,4 +266,86 @@ void TargetFunctionPrivateStacks::loadPrivateStackPointer(
   default:
     report_fatal_error("unhandled FPS type");
   }
+}
+
+static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, const TargetRegisterClass &RC) {
+  for (MCPhysReg Reg : RC)
+    if (LPR.available(MRI, Reg) )
+      return Reg;
+  return MCRegister::NoRegister;
+}
+
+void TargetFunctionPrivateStacks::emitPrologue(MachineFunction &MF,
+                                               unsigned PrivateFrameSize) {
+  assert(PrivateFrameSize > 0);
+  assert(MF.getFunction().fpsKind() == Function::FullFPS);
+
+  MachineBasicBlock &EntryMBB = MF.front();
+
+  // Claim a scratch register for use in checking whether we've reached the end
+  // of the FPS linked list of stack frames.
+  LivePhysRegs LPR(*TRI);
+  LPR.addLiveIns(EntryMBB);
+  MCPhysReg ScratchReg = getFreeReg(LPR, *MRI, ScratchRC);
+  if (ScratchReg == MCRegister::NoRegister)
+    report_fatal_error("Failed to get free scratch register for FPS prologue!");
+
+  // Make sure EFLAGS isn't live-in to the function, as we will clobber it.
+  assert(!LPR.contains(FlagsReg));
+
+  const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
+
+  MachineBasicBlock &NewEntryMBB = *MF.CreateMachineBasicBlock();
+  MachineBasicBlock &CheckMBB = *MF.CreateMachineBasicBlock();
+  MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
+  MF.push_front(&CheckMBB);
+  MF.push_front(&NewEntryMBB);
+  MF.push_back(&AllocMBB);
+  for (const auto &LI : EntryMBB.liveins()) {
+    CheckMBB.addLiveIn(LI);
+    AllocMBB.addLiveIn(LI);
+    NewEntryMBB.addLiveIn(LI);
+  }
+  NewEntryMBB.addSuccessor(&CheckMBB);
+
+  // NHM-TODO: Propagate to uses and eliminate this array.
+  std::array<MCPhysReg, 2> Regs = {ScratchReg, PSPReg};
+
+  // CheckMBB:
+  //  fps_t *r0 <- get fps pointer
+  //  frame_t *r1 = r0->current_frame;
+  //  frame_t *r1 = r1->next;
+  //  if (r1 == r1->next) {
+  //    __fps_morestack(index);
+  //    goto CheckMBB;
+  //  }
+  //  r0->current_frame = r1;
+  //  r1 = r1->data;
+
+  // NHM-FIXME: Might be able to move this to base class as well... some of these instructions are target-independent, like loads.
+  emitPrologueCheck(CheckMBB, Regs, PrivateFrameSize);
+
+  // NHM-FIXME: Rename AllocMBB to 'morestack'.
+  // if (overflow) goto AllocMBB;
+  TII->insertBranch(CheckMBB, &AllocMBB, &EntryMBB,
+                    {getCondEqualMO()}, DebugLoc());
+  CheckMBB.addSuccessor(&AllocMBB);
+  CheckMBB.addSuccessor(&EntryMBB);
+
+  // NHM-FIXME: Might be able to make this abstract too.
+  emitPrologueAlloc(AllocMBB, Regs, RegMask);
+
+  MFI->setAdjustsStack(true);
+  MFI->setHasCalls(true);
+
+  const auto AllocPreMBBI = AllocMBB.begin();
+  for (auto &LI : AllocMBB.liveins()) {
+    const auto Reg = LI.PhysReg;
+    const auto *RC = TRI->getMinimalPhysRegClass(Reg);
+    int FI = MFI->CreateSpillStackObject(TRI->getSpillSize(*RC), TRI->getSpillAlign(*RC));
+    TII->storeRegToStackSlot(AllocMBB, AllocPreMBBI, Reg, /*isKill*/true, FI, RC, /*VReg*/MCRegister::NoRegister);
+    TII->loadRegFromStackSlot(AllocMBB, AllocMBB.end(), Reg, FI, RC, /*VReg*/MCRegister::NoRegister);
+  }
+  TII->insertUnconditionalBranch(AllocMBB, &CheckMBB, DebugLoc());  
+  AllocMBB.addSuccessor(&CheckMBB);  
 }
