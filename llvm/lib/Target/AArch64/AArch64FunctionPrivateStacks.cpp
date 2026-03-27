@@ -1,76 +1,155 @@
-#include "llvm/CodeGen/FunctionPrivateStacks.h" // NHM-TODO: Maybe don't need this?
-
 #include "AArch64.h"
-#include "AArch64Subtarget.h"
 #include "AArch64InstrInfo.h"
 #include "AArch64RegisterInfo.h"
-#include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/IR/Function.h"
+#include "AArch64RegisterInfo.h"
+#include "AArch64Subtarget.h"
+#include "MCTargetDesc/AArch64MCTargetDesc.h"
+#include "Utils/AArch64BaseInfo.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineOperand.h"
+#include "llvm/CodeGen/TargetFunctionPrivateStacks.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
 
 #define PASS_KEY "aarch64-fps"
 #define DEBUG_TYPE PASS_KEY
 
-static constexpr MCPhysReg PSPReg = AArch64::X15;
-
 namespace {
 
-class AArch64FunctionPrivateStacks : public MachineFunctionPass {
+class AArch64FunctionPrivateStacks final : public TargetFunctionPrivateStacks {
 public:
   static char ID;
 
-  AArch64FunctionPrivateStacks() : MachineFunctionPass(ID) {
-    initializeAArch64FunctionPrivateStacksPass(*PassRegistry::getPassRegistry());
+  AArch64FunctionPrivateStacks()
+      : TargetFunctionPrivateStacks(ID, PSPReg, AArch64::NZCV,
+                                    AArch64::GPR64RegClass) {
+    initializeAArch64FunctionPrivateStacksPass(
+        *PassRegistry::getPassRegistry());
   }
 
-  bool runOnMachineFunction(MachineFunction &MF) override;
-
 private:
-  const AArch64InstrInfo *TII;
-  const AArch64RegisterInfo *TRI;
-  MachineFrameInfo *MFI;
+  bool hasBasePointer(const MachineFunction &MF) const override {
+    return static_cast<const AArch64RegisterInfo *>(TRI)->hasBasePointer(MF);
+  }
+
+  const AArch64InstrInfo *TII() const {
+    return static_cast<const AArch64InstrInfo *>(this->TargetFunctionPrivateStacks::TII);
+  }
+
+  const MachineOperand &getLdStBaseOp(const MachineInstr &MI) const {
+    return TII()->getLdStBaseOp(MI);
+  }
+
+  unsigned getLdStBaseIdx(const MachineInstr &MI) const {
+    return getLdStBaseOp(MI).getOperandNo();
+  }
+
+  MachineOperand &getLdStBaseOp(MachineInstr &MI) const {
+    return MI.getOperand(getLdStBaseIdx(MI));
+  }
+
+  const MachineOperand &getLdStOffsetOp(const MachineInstr &MI) const {
+    return TII()->getLdStOffsetOp(MI);
+  }
+
+  unsigned getLdStOffsetIdx(const MachineInstr &MI) const {
+    return getLdStOffsetOp(MI).getOperandNo();
+  }
+
+  MachineOperand &getLdStOffsetOp(MachineInstr &MI) const {
+    return MI.getOperand(getLdStOffsetIdx(MI));
+  }
+
+  // NHM-FIXME: This could be made less redundant.
+  bool checkFrameIndex(const MachineOperand &MO) const override {
+    const MachineInstr &MI = *MO.getParent();
+    if (!MI.mayLoadOrStore())
+      return false;
+    const MachineOperand &BaseMO = getLdStBaseOp(MI);
+    return &BaseMO == &MO;
+  }
+
+  bool instrumentSetjmps(MachineFunction &MF) override {
+    // NHM-FIXME: Should handle external setjmps at least...
+    return false;
+  }
+
+  MachineOperand &getAddrBaseOp(MachineInstr &MI) const override {
+    return getLdStBaseOp(MI);
+  }
+  MachineOperand &getAddrDispOp(MachineInstr &MI) const override {
+    return getLdStOffsetOp(MI);
+  }
+
+  MachineOperand getCondEqualMO() const override {
+    return MachineOperand::CreateImm(AArch64CC::EQ);
+  }
+
+  bool needScratchForPointerToFPSData() const override { return true; }
+
+  void getPointerToFPSData(MachineBasicBlock &MBB,
+                           MachineBasicBlock::iterator MBBI,
+                           const GlobalVariable *Member, MCPhysReg DestReg,
+                           MCPhysReg ScratchReg) const override;
 };
 
 } // namespace
 
-bool AArch64FunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
-  if (!MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack))
-    return false;
-  assert(!MF.getName().starts_with("__fps_"));
+void AArch64FunctionPrivateStacks::getPointerToFPSData(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    const GlobalVariable *Member, MCPhysReg DestReg,
+    MCPhysReg ScratchReg) const {
+  // AArch64 equivalent of the X86 implementation:
+  //   adrp  scratch, :gottpoff:Member@page
+  //   ldr   dest,   [scratch, :gottpoff_lo12:Member]
+  //   mrs   scratch, tpidr_el0
+  //   add   dest,   dest, scratch         ; dest = TLS address of Member
+  //   adrp  scratch, StackIdxSym@page
+  //   ldr   scratch, [scratch, :lo12:StackIdxSym]
+  //   add   dest,   dest, scratch         ; dest += *StackIdxSym
 
-  auto &STI = MF.getSubtarget<AArch64Subtarget>();
-  TII = STI.getInstrInfo();
-  TRI = STI.getRegisterInfo();
-  MFI = &MF.getFrameInfo();
+  // Load TLS offset of Member from GOT (initial-exec / GOTTPOFF).
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADRP), ScratchReg)
+      .addGlobalAddress(Member, 0, AArch64II::MO_TLS | AArch64II::MO_PAGE);
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDRXui), DestReg)
+      .addReg(ScratchReg)
+      .addGlobalAddress(Member, 0,
+                        AArch64II::MO_TLS | AArch64II::MO_PAGEOFF |
+                            AArch64II::MO_NC);
 
-  // NHM-FIXME: Remove this debug check.
-  for (const MachineBasicBlock &MBB : MF)
-    for (const MachineInstr &MI : MBB)
-      for (const MachineOperand &MO : MI.operands())
-        if (MO.isReg())
-          assert(MO.getReg() != PSPReg);
+  // Add thread pointer to get the actual TLS address of Member.
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::MRS), ScratchReg)
+      .addImm(AArch64SysReg::TPIDR_EL0);
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADDXrr), DestReg)
+      .addReg(DestReg)
+      .addReg(ScratchReg);
 
-  // Make sure there is no base pointer and no dynamic stack allocations.
-  if (EnableFPSStrictMode) {
-    assert(!TRI->hasBasePointer(MF) &&
-           "No function should have a base pointer!");
-    assert(!MFI->hasVarSizedObjects() && "All variable-sized stack objects should have been moved to the unsafe stack already!");
-  }
-
-  errs() << "HERE\n";
-
-  // NHM-FIXME: Implement the rest.
-  return true;
+  // Add *StackIdxSym.
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADRP), ScratchReg)
+      .addGlobalAddress(StackIdxSym, 0, AArch64II::MO_PAGE);
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDRXui), ScratchReg)
+      .addReg(ScratchReg)
+      .addGlobalAddress(StackIdxSym, 0,
+                        AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADDXrr), DestReg)
+      .addReg(DestReg)
+      .addReg(ScratchReg);
 }
 
 INITIALIZE_PASS(AArch64FunctionPrivateStacks, PASS_KEY,
                 "AArch64 Function Private Stacks", false, false)
 
 FunctionPass *llvm::createAArch64FunctionPrivateStacksPass() {
+#if 0
   return new AArch64FunctionPrivateStacks();
+#else
+  report_fatal_error("TODO");
+#endif
 }
 
 char AArch64FunctionPrivateStacks::ID = 0;

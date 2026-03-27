@@ -1,28 +1,23 @@
-#include "llvm/CodeGen/FunctionPrivateStacks.h" // NHM-TODO: Maybe don't need this?
-
 #include "MCTargetDesc/X86MCTargetDesc.h"
+#include "MCTargetDesc/X86BaseInfo.h"
 #include "X86.h"
 #include "X86InstrInfo.h"
 #include "X86RegisterInfo.h"
 #include "X86Subtarget.h"
-#include "llvm/IR/Module.h"
-#include "llvm/CodeGen/MachineBasicBlock.h"
-#include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/CodeGen/TargetRegisterInfo.h"
-#include "llvm/MC/MCContext.h"
-#include "llvm/CodeGen/MachineFrameInfo.h"
-#include "MCTargetDesc/X86BaseInfo.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
+#include "llvm/CodeGen/RegAllocPBQP.h"
+#include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/CodeGen/TargetFunctionPrivateStacks.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/MC/MCRegister.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/DivisionByConstantInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/CodeGen/RegisterScavenging.h"
-#include "llvm/CodeGen/RegAllocPBQP.h"
-#include "llvm/CodeGen/MachineJumpTableInfo.h"
-#include "llvm/CodeGen/TargetFunctionPrivateStacks.h"
 
 using namespace llvm;
 
@@ -73,15 +68,11 @@ private:
   bool checkFrameIndex(const MachineOperand &MO) const override;
 
   // NHM-FIXME: No longer need pointer to member.
-  void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalVariable *Member, Register Reg);
+  void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const GlobalVariable *Member, MCPhysReg DestReg, MCPhysReg _ = X86::NoRegister) const override;
 
-  void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
-                                   MachineBasicBlock::iterator MBBI,
-                                   Register Reg,
-                                   const DebugLoc &Loc) override;
   void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
-                                   Register Reg, const DebugLoc &Loc) override;
+                                   Register Reg) override;
 
   // NOTE: Does not permit PtrReg == ValReg.
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
@@ -115,11 +106,21 @@ private:
   MachineOperand &getAddrDispOp(MachineInstr &MI) const override {
     return getAddrOp(MI, X86::AddrDisp);
   }
+
+  void loadRegFromBaseReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Dest, Register Src) const override {
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Dest)
+        .addReg(Src)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+  }
+
+  bool needScratchForPointerToFPSData() const override { return false; }
 };
 
 void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
-    const DebugLoc &Loc) {
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg) {
 
   // Emit PSP reload code.
   // MOV r1, [rip+gottpoff(__fps_stackframe_<fn>@gottpoff)]
@@ -140,20 +141,7 @@ void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
       .addReg(X86::FS);
 }
 
-void X86FunctionPrivateStacks::loadPrivateStackPointerFull(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
-    const DebugLoc &Loc) {
-
-  getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Reg);
-  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64rm), Reg)
-      .addReg(Reg)
-      .addImm(1)
-      .addReg(X86::NoRegister)
-      .addImm(0)
-      .addReg(X86::NoRegister);
-}
-
-void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const DebugLoc &Loc, const GlobalVariable *Member, Register Reg) {
+void X86FunctionPrivateStacks::getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const GlobalVariable *Member, MCPhysReg Reg, MCPhysReg _) const {
   // MOV reg, [rip+gottpoff(__fps_thd_stackptrs@gottpoff)]
   // MOV reg, fs:[reg]
   // ADD reg, [rip+__stackidx_<fn>]
@@ -331,7 +319,7 @@ void X86FunctionPrivateStacks::emitPrologueCheck(MachineBasicBlock &CheckMBB,
                                                  std::array<MCPhysReg, 2> Regs,
                                                  unsigned PrivateFrameSize) {
  // fps_t *r0 = ...;
-  getPointerToFPSData(CheckMBB, CheckMBB.end(), Loc, ThdStacksSym, Regs[0]);
+  getPointerToFPSData(CheckMBB, CheckMBB.end(), ThdStacksSym, Regs[0]);
 
   // frame_t *r1 = r0->current_frame;
   BuildMI(CheckMBB, CheckMBB.end(), Loc, TII->get(X86::MOV64rm), Regs[1])
@@ -396,7 +384,7 @@ void X86FunctionPrivateStacks::emitEpilogueImpl(
   // frame_t *r1 = r0->current_frame;
   // r1 = r1->prev;
   // r0->current_frame = r1;
-  getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Regs[0]);
+  getPointerToFPSData(MBB, MBBI, ThdStacksSym, Regs[0]);
   BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
       .addReg(Regs[1])
       .addImm(1)

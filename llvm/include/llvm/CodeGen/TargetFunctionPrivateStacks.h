@@ -56,20 +56,14 @@ protected:
   const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses) const;
 
   void loadPrivateStackPointer(
-      MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
-      const DebugLoc &Loc = DebugLoc());
+      MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg);
 
   void fixupPrivateStackAccess(MachineInstr &MI,
                           const DenseMap<int, uint64_t> &PrivateFrameInfo);
 
-  virtual void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
-                                   MachineBasicBlock::iterator MBBI,
-                                   Register Reg,
-                                   const DebugLoc &Loc) = 0;
   virtual void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
                                            MachineBasicBlock::iterator MBBI,
-                                           Register Reg,
-                                           const DebugLoc &Loc) = 0;
+                                           Register Reg) = 0;
 
   virtual void emitPrologueCheck(MachineBasicBlock &CheckMBB,
                                  std::array<MCPhysReg, 2> Regs,
@@ -84,6 +78,20 @@ protected:
 
   virtual MachineOperand &getAddrBaseOp(MachineInstr &MI) const = 0;
   virtual MachineOperand &getAddrDispOp(MachineInstr &MI) const = 0;
+
+  virtual void loadRegFromBaseReg(MachineBasicBlock &MBB,
+                                  MachineBasicBlock::iterator MBBI,
+                                  Register Dest, Register Src) const = 0;
+
+  virtual bool needScratchForPointerToFPSData() const = 0;
+  virtual void getPointerToFPSData(MachineBasicBlock &MBB,
+                                   MachineBasicBlock::iterator MBBI,
+                                   const GlobalVariable *Member,
+                                   MCPhysReg DestReg,
+                                   MCPhysReg ScratchReg) const = 0;
+  void loadPrivateStackPointerFull(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg) const;
+
 };
 
 } // namespace llvm 

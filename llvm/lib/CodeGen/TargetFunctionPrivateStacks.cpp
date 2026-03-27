@@ -1,18 +1,17 @@
 #include "llvm/CodeGen/TargetFunctionPrivateStacks.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/TargetRegisterInfo.h"
-#include "llvm/IR/Function.h"
-#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/CodeGen/FunctionPrivateStacks.h"
+#include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/MC/MCRegister.h"
-#include "llvm/CodeGen/TargetInstrInfo.h"
-#include "llvm/MC/MCRegisterInfo.h"
 
 #define DEBUG_TYPE "target-fps"
 
@@ -237,8 +236,7 @@ const TargetRegisterClass *TargetFunctionPrivateStacks::computeAddrBaseRegClass(
 }
 
 void TargetFunctionPrivateStacks::loadPrivateStackPointer(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
-    const DebugLoc &Loc) {
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg) {
   const MachineFunction &MF = *MBB.getParent();
   const Function &F = MF.getFunction();
 
@@ -259,10 +257,10 @@ void TargetFunctionPrivateStacks::loadPrivateStackPointer(
   // Normal case: no live EFLAGS.
   switch (F.fpsKind()) {
   case Function::FullFPS:
-    loadPrivateStackPointerFull(MBB, MBBI, Reg, Loc);
+    loadPrivateStackPointerFull(MBB, MBBI, Reg);
     break;
   case Function::LeafFPS:
-    loadPrivateStackPointerLeaf(MBB, MBBI, Reg, Loc);
+    loadPrivateStackPointerLeaf(MBB, MBBI, Reg);
     break;
   default:
     report_fatal_error("unhandled FPS type");
@@ -384,4 +382,11 @@ void TargetFunctionPrivateStacks::fixupPrivateStackAccess(
   BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
   assert(PrivateFrameInfo.contains(FI));
   DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
+}
+
+void TargetFunctionPrivateStacks::loadPrivateStackPointerFull(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg) const {
+
+  getPointerToFPSData(MBB, MBBI, ThdStacksSym, Reg, MCRegister::NoRegister);
+  loadRegFromBaseReg(MBB, MBBI, Reg, Reg);
 }
