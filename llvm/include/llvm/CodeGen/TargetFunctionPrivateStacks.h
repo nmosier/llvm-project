@@ -50,7 +50,7 @@ protected:
       const DenseMap<int, uint64_t> &PrivateFrameInfo);
 
   void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
-  virtual void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) = 0; // NHM-FIXME: Should be de-virtualized.
+  void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);
   virtual bool instrumentSetjmps(MachineFunction &MF) = 0; // NHM-FIXME: Should be de-virtualized.
 
   const TargetRegisterClass *computeAddrBaseRegClass(ArrayRef<const MachineOperand *> Uses) const;
@@ -79,6 +79,7 @@ protected:
                                  std::array<MCPhysReg, 2> Regs,
                                  const uint32_t *RegMask) = 0;
   virtual MachineOperand getCondEqualMO() const = 0;
+  virtual void emitEpilogueImpl(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, std::array<MCPhysReg, 2> Regs) = 0;
 };
 
 } // namespace llvm 

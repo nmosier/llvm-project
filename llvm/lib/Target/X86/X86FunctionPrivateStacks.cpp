@@ -87,7 +87,6 @@ private:
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
 
   bool instrumentSetjmps(MachineFunction &MF) override;
-  void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) override;
   void fixupPrivateStackAccess(
       MachineInstr &MI,
       const DenseMap<int, uint64_t> &PrivateFrameInfo) override;
@@ -100,6 +99,8 @@ private:
   MachineOperand getCondEqualMO() const override {
     return MachineOperand::CreateImm(X86::COND_E);
   }
+
+  void emitEpilogueImpl(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, std::array<MCPhysReg, 2> Regs) override;
 };
 
 // NHM-FIXME: Remove.
@@ -110,48 +111,6 @@ static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &
     }
   }
   return X86::NoRegister;
-}
-
-void X86FunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {
-  assert(PrivateFrameSize > 0);
-  assert(MF.getFunction().fpsKind() == Function::FullFPS);
-
-  DebugLoc Loc;
-
-  for (MachineBasicBlock &MBB : MF) {
-    if (MBB.empty() || !MBB.back().isReturn())
-      continue;
-
-    auto MBBI = MBB.back().getIterator();
-
-    LivePhysRegs LPR(*TRI);
-    LPR.addLiveOuts(MBB);
-    LPR.stepBackward(MBB.back());
-    assert(!LPR.contains(X86::EFLAGS));
-    MCPhysReg ScratchReg = getFreeReg(LPR, *MRI);
-    if (ScratchReg == X86::NoRegister)
-      report_fatal_error("Failed to get scratach register for FPS epilogue!");
-    std::array<MCPhysReg, 2> Regs = {ScratchReg, PSPReg};
-
-    // fps_t *r0 = ...;
-    // frame_t *r1 = r0->current_frame;
-    // r1 = r1->prev;
-    // r0->current_frame = r1;
-    getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Regs[0]);
-    BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
-        .addReg(Regs[1])
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(offsetof_frame_prev)
-        .addReg(X86::NoRegister);
-    BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mr))
-        .addReg(Regs[0])
-        .addImm(1)
-        .addReg(X86::NoRegister)
-        .addImm(offsetof_fps_current_frame)
-        .addReg(X86::NoRegister)
-        .addReg(Regs[1]);
-  }
 }
 
 void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
@@ -437,6 +396,29 @@ void X86FunctionPrivateStacks::emitPrologueAlloc(MachineBasicBlock &AllocMBB, st
       .addUse(X86::RDI, RegState::ImplicitKill);
   MFI->setAdjustsStack(true);
   MFI->setHasCalls(true);
+}
+
+void X86FunctionPrivateStacks::emitEpilogueImpl(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    std::array<MCPhysReg, 2> Regs) {
+  // fps_t *r0 = ...;
+  // frame_t *r1 = r0->current_frame;
+  // r1 = r1->prev;
+  // r0->current_frame = r1;
+  getPointerToFPSData(MBB, MBBI, DebugLoc(), ThdStacksSym, Regs[0]);
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
+      .addReg(Regs[1])
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(offsetof_frame_prev)
+      .addReg(X86::NoRegister);
+  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mr))
+      .addReg(Regs[0])
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(offsetof_fps_current_frame)
+      .addReg(X86::NoRegister)
+      .addReg(Regs[1]);
 }
 
 } // end namespace

@@ -12,6 +12,7 @@
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/MC/MCRegister.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/MC/MCRegisterInfo.h"
 
 #define DEBUG_TYPE "target-fps"
 
@@ -348,4 +349,27 @@ void TargetFunctionPrivateStacks::emitPrologue(MachineFunction &MF,
   }
   TII->insertUnconditionalBranch(AllocMBB, &CheckMBB, DebugLoc());  
   AllocMBB.addSuccessor(&CheckMBB);  
+}
+
+void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {
+  assert(PrivateFrameSize > 0);
+  assert(MF.getFunction().fpsKind() == Function::FullFPS);
+
+  for (MachineBasicBlock &MBB : MF) {
+    if (MBB.empty() || !MBB.back().isReturn())
+      continue;
+
+    auto MBBI = MBB.back().getIterator();
+
+    LivePhysRegs LPR(*TRI);
+    LPR.addLiveOuts(MBB);
+    LPR.stepBackward(MBB.back());
+    assert(!LPR.contains(FlagsReg));
+    MCPhysReg ScratchReg = getFreeReg(LPR, *MRI, ScratchRC);
+    if (ScratchReg == MCRegister::NoRegister)
+      report_fatal_error("Failed to get scratch register for FPS epilogue!");
+    std::array<MCPhysReg, 2> Regs = {ScratchReg, PSPReg};
+
+    emitEpilogueImpl(MBB, MBBI, Regs);
+  }
 }
