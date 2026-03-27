@@ -373,3 +373,15 @@ void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Pri
     emitEpilogueImpl(MBB, MBBI, Regs);
   }
 }
+
+void TargetFunctionPrivateStacks::fixupPrivateStackAccess(
+    MachineInstr &MI, const DenseMap<int, uint64_t> &PrivateFrameInfo) {
+  MachineOperand &BaseMO = getAddrBaseOp(MI);
+  MachineOperand &DispMO = getAddrDispOp(MI);
+  assert(BaseMO.isFI());
+  assert(DispMO.isImm());
+  int FI = BaseMO.getIndex();
+  BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
+  assert(PrivateFrameInfo.contains(FI));
+  DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
+}

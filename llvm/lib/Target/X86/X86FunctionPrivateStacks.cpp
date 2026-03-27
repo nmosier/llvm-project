@@ -87,9 +87,7 @@ private:
   void storePrivateStackPointer(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg, const DebugLoc &Loc = DebugLoc());
 
   bool instrumentSetjmps(MachineFunction &MF) override;
-  void fixupPrivateStackAccess(
-      MachineInstr &MI,
-      const DenseMap<int, uint64_t> &PrivateFrameInfo) override;
+
   void emitPrologueCheck(MachineBasicBlock &CheckMBB,
                          std::array<MCPhysReg, 2> Regs,
                          unsigned PrivateFrameSize) override;
@@ -100,18 +98,24 @@ private:
     return MachineOperand::CreateImm(X86::COND_E);
   }
 
-  void emitEpilogueImpl(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, std::array<MCPhysReg, 2> Regs) override;
-};
+  void emitEpilogueImpl(MachineBasicBlock &MBB,
+                        MachineBasicBlock::iterator MBBI,
+                        std::array<MCPhysReg, 2> Regs) override;
 
-// NHM-FIXME: Remove.
-static MCPhysReg getFreeReg(const LivePhysRegs &LPR, const MachineRegisterInfo &MRI, const TargetRegisterClass &RC = X86::GR64RegClass, ArrayRef<MCPhysReg> IgnoreRegs = {}) {
-  for (MCPhysReg Reg : RC) {
-    if (LPR.available(MRI, Reg) && !is_contained(IgnoreRegs, Reg)) {
-      return Reg;
-    }
+  MachineOperand &getAddrOp(MachineInstr &MI, unsigned OpIdx) const {
+    const int MemRefIdx = X86::getFirstAddrOperandIdx(MI);
+    assert(MemRefIdx >= 0);
+    return MI.getOperand(MemRefIdx + OpIdx);
   }
-  return X86::NoRegister;
-}
+
+  MachineOperand &getAddrBaseOp(MachineInstr &MI) const override {
+    return getAddrOp(MI, X86::AddrBaseReg);
+  }
+
+  MachineOperand &getAddrDispOp(MachineInstr &MI) const override {
+    return getAddrOp(MI, X86::AddrDisp);
+  }
+};
 
 void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
@@ -321,19 +325,6 @@ bool X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
 bool X86FunctionPrivateStacks::checkFrameIndex(const MachineOperand &MO) const {
   const int MemRefBeginIdx = X86::getFirstAddrOperandIdx(*MO.getParent());
   return MemRefBeginIdx >= 0 && MO.getOperandNo() == static_cast<unsigned>(MemRefBeginIdx + X86::AddrBaseReg);
-}
-
-void X86FunctionPrivateStacks::fixupPrivateStackAccess(MachineInstr &MI, const DenseMap<int, uint64_t> &PrivateFrameInfo) {
-  const int MemRefIdx = X86::getFirstAddrOperandIdx(MI);
-  assert(MemRefIdx >= 0);
-  MachineOperand &BaseMO = MI.getOperand(MemRefIdx + X86::AddrBaseReg);
-  MachineOperand &DispMO = MI.getOperand(MemRefIdx + X86::AddrDisp);
-  assert(BaseMO.isFI());
-  assert(DispMO.isImm());
-  int FI = BaseMO.getIndex();
-  BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
-  assert(PrivateFrameInfo.contains(FI));
-  DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
 }
 
 void X86FunctionPrivateStacks::emitPrologueCheck(MachineBasicBlock &CheckMBB,

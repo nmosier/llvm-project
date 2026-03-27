@@ -18,7 +18,7 @@ protected:
   TargetFunctionPrivateStacks(char &ID, MCPhysReg PSPReg, MCPhysReg FlagsReg, const TargetRegisterClass &ScratchRC)
       : MachineFunctionPass(ID), PSPReg(PSPReg), FlagsReg(FlagsReg), ScratchRC(ScratchRC) {}
 
-  bool runOnMachineFunction(MachineFunction &MF) override;
+  bool runOnMachineFunction(MachineFunction &MF) final;
 
   const TargetInstrInfo *TII;
   const TargetRegisterInfo *TRI;
@@ -59,9 +59,8 @@ protected:
       MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg,
       const DebugLoc &Loc = DebugLoc());
 
-  virtual void
-  fixupPrivateStackAccess(MachineInstr &MI,
-                          const DenseMap<int, uint64_t> &PrivateFrameInfo) = 0;
+  void fixupPrivateStackAccess(MachineInstr &MI,
+                          const DenseMap<int, uint64_t> &PrivateFrameInfo);
 
   virtual void loadPrivateStackPointerFull(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
@@ -79,7 +78,12 @@ protected:
                                  std::array<MCPhysReg, 2> Regs,
                                  const uint32_t *RegMask) = 0;
   virtual MachineOperand getCondEqualMO() const = 0;
-  virtual void emitEpilogueImpl(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, std::array<MCPhysReg, 2> Regs) = 0;
+  virtual void emitEpilogueImpl(MachineBasicBlock &MBB,
+                                MachineBasicBlock::iterator MBBI,
+                                std::array<MCPhysReg, 2> Regs) = 0;
+
+  virtual MachineOperand &getAddrBaseOp(MachineInstr &MI) const = 0;
+  virtual MachineOperand &getAddrDispOp(MachineInstr &MI) const = 0;
 };
 
 } // namespace llvm 
