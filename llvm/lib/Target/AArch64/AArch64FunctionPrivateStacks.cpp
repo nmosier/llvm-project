@@ -78,6 +78,7 @@ private:
 
   // NHM-FIXME: This could be made less redundant.
   bool checkFrameIndex(const MachineOperand &MO) const override {
+#if 0
     const MachineInstr &MI = *MO.getParent();
     if (!MI.mayLoadOrStore())
       return false;
@@ -93,6 +94,9 @@ private:
       return false;
 
     return true;
+#else
+    return true;
+#endif
   }
 
   bool instrumentSetjmps(MachineFunction &MF) override {
@@ -138,35 +142,6 @@ private:
   void fixupPrivateStackAccess(MachineInstr &MI) override {
     // NHM-FIXME: Should eliminate this entirely, eventually.
     LDBG() << "not fixing up private stack access";
-
-#if 0
-    LDBG() << "before: " << MI;
-
-    for (const MachineOperand &MO : MI.operands()) {
-      if (MO.isFI()) {
-        int FI = MO.getIndex();
-        // NHM-FIXME: This is just for debugging, so remove later.
-        if (MFI->getStackID(FI) != TargetStackID::PrivateStack)
-          continue;
-        assert(MFI->getStackID(FI) == TargetStackID::PrivateStack);
-        TRI()->eliminateFrameIndex(MI.getIterator(), /*SPAdj*/0, MO.getOperandNo(), nullptr);
-      }
-    }
-
-    LDBG() << "after: " << MI;
-
-    // Remove any FixedStackPseudoSourceValue MachineMemOperands.
-    if (!MI.hasOneMemOperand())
-      return;
-
-    const MachineMemOperand *MMO = *MI.memoperands_begin();
-    const PseudoSourceValue *PSV = MMO->getPseudoValue();
-    if (!PSV || !isa<FixedStackPseudoSourceValue>(PSV))
-      return;
-
-    MI.setMemRefs(*MI.getParent()->getParent(), {});
-    LDBG() << "removing FixedStackPseudoSourceValue memory operand from stack spill instruction";
-#endif
   }
 };
 

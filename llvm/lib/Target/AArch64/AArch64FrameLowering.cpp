@@ -2707,6 +2707,7 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
   // Conservatively always assume BigStack when there are SVE spills.
   bool BigStack = SVEStackSize || (EstimatedStackSize + CSStackSize +
                                    CalleeStackUsed) > EstimatedStackSizeLimit;
+  BigStack |= MFI.estimatePrivateStackSize() >= EstimatedStackSizeLimit;
   if (BigStack || !CanEliminateFrame || RegInfo->cannotEliminateFrame(MF))
     AFI->setHasStackFrame(true);
 

@@ -184,6 +184,16 @@ uint64_t MachineFrameInfo::estimateStackSize(const MachineFunction &MF) const {
   return alignTo(Offset, StackAlign);
 }
 
+uint64_t MachineFrameInfo::estimatePrivateStackSize() const {
+  std::size_t Size = 0;
+  for (int i = 0, e = getObjectIndexEnd(); i != e; ++i) {
+    if (isDeadObjectIndex(i) || getStackID(i) != TargetStackID::PrivateStack)
+      continue;
+    Size = getObjectOffset(i);
+  }
+  return Size;
+}
+
 void MachineFrameInfo::computeMaxCallFrameSize(
     MachineFunction &MF, std::vector<MachineBasicBlock::iterator> *FrameSDOps) {
   const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();

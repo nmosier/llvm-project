@@ -612,6 +612,8 @@ public:
   /// Estimate and return the size of the stack frame.
   LLVM_ABI uint64_t estimateStackSize(const MachineFunction &MF) const;
 
+  uint64_t estimatePrivateStackSize() const;
+
   /// Return the correction for frame offsets.
   int64_t getOffsetAdjustment() const { return OffsetAdjustment; }
 
