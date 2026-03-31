@@ -141,6 +141,8 @@ public:
     current_frame->prev = current_frame;
     current_frame->next = current_frame;
 
+    FPS_LOG("current_frame=%p private_frame_size=%lu\n", static_cast<frame_t *>(current_frame), private_frame_size);
+
     top_frame = current_frame;
   }
 
@@ -247,6 +249,7 @@ public:
   void registerStack(size_t index) {
     FPS_CHECK(index < num_private_stacks);
     FPS_CHECK(configs[index].registered);
+    FPS_LOG("stack %lu @ %p\n", index, &stacks[index]);
     stacks[index].Register(configs[index].private_frame_size);
   }
 
@@ -361,11 +364,16 @@ size_t getUnusedIndex() {
 extern "C" __attribute__((visibility("default"))) uint64_t __fps_regstack(const char *name, unsigned private_stack_size) {
   init_main_thread();
 
+  if (private_stack_size == 0) {
+    return -1; // NHM-FIXME: Make return type int64_t.
+  }
+  FPS_CHECK(private_stack_size != (unsigned) -1);
+
   Lock live_threads_lock(live_threads_mutex);
   
   const size_t index = getUnusedIndex();
   configs[index].Register(private_stack_size);
-  FPS_LOG("registering %s (%" PRIu64 ")", name, index);
+  FPS_LOG("registering %s (%" PRIu64 ") with size %u", name, index, private_stack_size);
   for (LiveThread *thread = live_threads; thread; thread = thread->next)
     thread->registerStack(index);
   return index * sizeof(fps_t);
@@ -376,7 +384,9 @@ struct reginfo {
   const char *name;
   const uintptr_t &private_frame_size;
 };
-extern "C" __attribute__((visibility("default"))) void __fps_regstacks(uint64_t n, const reginfo *vec) {
+extern "C" __attribute__((visibility("default"))) void
+__fps_regstacks(uint64_t n, const reginfo *vec) {
+  FPS_LOG("__fps_thd_stacks @ %p\n", &__fps_thd_stacks);
   for (uint64_t i = 0; i < n; ++i) {
     auto &info = vec[i];
     if (!info.private_frame_size)

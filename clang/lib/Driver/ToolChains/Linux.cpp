@@ -927,10 +927,10 @@ SanitizerMask Linux::getSupportedSanitizers() const {
   Res |= SanitizerKind::KernelAddress;
   Res |= SanitizerKind::Vptr;
   Res |= SanitizerKind::SafeStack;
-  if (IsX86_64) {
+  if (IsX86_64 || IsAArch64)
     Res |= SanitizerKind::FunctionPrivateStacks;
+  if (IsX86_64)
     Res |= SanitizerKind::Lockbox;
-  }
   if (IsX86_64 || IsMIPS64 || IsAArch64 || IsLoongArch64)
     Res |= SanitizerKind::DataFlow;
   if (IsX86_64 || IsMIPS64 || IsAArch64 || IsX86 || IsArmArch || IsPowerPC64 ||
