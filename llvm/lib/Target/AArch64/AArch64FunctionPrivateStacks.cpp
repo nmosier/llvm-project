@@ -136,7 +136,10 @@ private:
                           Register Src) const override;
 
   void fixupPrivateStackAccess(MachineInstr &MI) override {
+    // NHM-FIXME: Should eliminate this entirely, eventually.
+    LDBG() << "not fixing up private stack access";
 
+#if 0
     LDBG() << "before: " << MI;
 
     for (const MachineOperand &MO : MI.operands()) {
@@ -163,6 +166,7 @@ private:
 
     MI.setMemRefs(*MI.getParent()->getParent(), {});
     LDBG() << "removing FixedStackPseudoSourceValue memory operand from stack spill instruction";
+#endif
   }
 };
 
@@ -259,24 +263,24 @@ void AArch64FunctionPrivateStacks::loadPrivateStackPointerLeaf(
 void AArch64FunctionPrivateStacks::emitPrologueCheck(
     MachineBasicBlock &CheckMBB, std::array<MCPhysReg, 2> Regs,
     unsigned PrivateFrameSize) {
-  // fps_t *Regs[0] = <TLS address of ThdStacksSym>;
-  // (Uses Regs[1] as scratch for the multi-instruction TLS address sequence.)
-  getPointerToFPSData(CheckMBB, CheckMBB.end(), ThdStacksSym, Regs[0], Regs[1]);
-
-  // frame_t *Regs[1] = Regs[0]->current_frame;
-  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII()->get(AArch64::LDRXui), Regs[1])
-      .addReg(Regs[0])
-      .addImm(0); // offsetof_fps_current_frame = 0 (scaled: 0/8 = 0)
-
   // AArch64 lacks memory-operand arithmetic, so we need a third scratch
   // register to load current_frame->next before comparing.
   LivePhysRegs LPR(*TRI());
   LPR.addLiveIns(CheckMBB);
   MCPhysReg TmpReg = getScratchReg(LPR, {Regs[0], Regs[1]});
 
-  // frame_t *TmpReg = Regs[1]->next;  (offsetof_frame_next = -8)
-  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII()->get(AArch64::LDURXi), TmpReg)
-      .addReg(Regs[1])
+  // fps_t *Regs[0] = <TLS address of ThdStacksSym>;
+  // (Uses Regs[1] as scratch for the multi-instruction TLS address sequence.)
+  getPointerToFPSData(CheckMBB, CheckMBB.end(), ThdStacksSym, Regs[0], Regs[1]);
+
+  // frame_t *Tmp = Regs[0]->current_frame;
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII()->get(AArch64::LDRXui), TmpReg)
+      .addReg(Regs[0])
+      .addImm(0); // offsetof_fps_current_frame = 0 (scaled: 0/8 = 0)
+
+  // frame_t *Regs[1] = Tmp->next;  (offsetof_frame_next = -8)
+  BuildMI(CheckMBB, CheckMBB.end(), Loc, TII()->get(AArch64::LDURXi), Regs[1])
+      .addReg(TmpReg)
       .addImm(-8); // offsetof_frame_next = -8 (unscaled byte offset)
 
   // bool overflow = (Regs[1] == TmpReg);
@@ -286,7 +290,7 @@ void AArch64FunctionPrivateStacks::emitPrologueCheck(
       .addReg(TmpReg)
       .addImm(0); // no shift
 
-  // Regs[0]->current_frame = TmpReg;
+  // Regs[0]->current_frame = Regs[1];
   BuildMI(CheckMBB, CheckMBB.end(), Loc, TII()->get(AArch64::STRXui))
       .addReg(Regs[1])
       .addReg(Regs[0])
