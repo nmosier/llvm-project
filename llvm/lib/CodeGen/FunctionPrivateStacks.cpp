@@ -59,7 +59,7 @@ public:
 GlobalVariable *FunctionPrivateStacks::createFrameSize(Function &F) {
   return new GlobalVariable(M, Int64Ty, /*isConstant*/ true,
                             GlobalVariable::InternalLinkage,
-                            ConstantInt::get(Int64Ty, -1) /* NHM-FIXME */,
+                            ConstantInt::get(Int64Ty, 0),
                             "__fps_framesize_" + F.getName());
 }
 

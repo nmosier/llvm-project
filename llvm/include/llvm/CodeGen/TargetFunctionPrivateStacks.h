@@ -38,7 +38,7 @@ protected:
   virtual bool hasBasePointer(const MachineFunction &MF) const = 0;
 
   uint64_t collectPrivateFrameObjects(
-      MachineFunction &MF, DenseMap<int, uint64_t> &PrivateFrameInfo,
+      MachineFunction &MF,
       SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses,
       Align &PrivateFrameAlign);
 
@@ -49,8 +49,7 @@ protected:
   virtual bool checkFrameIndex(const MachineOperand &MO) const = 0;
 
   void assignRegsForPrivateStackPointer(
-      MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
-      const DenseMap<int, uint64_t> &PrivateFrameInfo);
+      MachineFunction &MF, ArrayRef<MachineInstr *> Uses);
 
   void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
   void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);
@@ -61,9 +60,7 @@ protected:
   void loadPrivateStackPointer(
       MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg);
 
-  virtual void
-  fixupPrivateStackAccess(MachineInstr &MI,
-                          const DenseMap<int, uint64_t> &PrivateFrameInfo);
+  virtual void fixupPrivateStackAccess(MachineInstr &MI);
 
   virtual void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
                                            MachineBasicBlock::iterator MBBI,

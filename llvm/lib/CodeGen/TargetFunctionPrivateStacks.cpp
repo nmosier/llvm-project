@@ -19,6 +19,8 @@
 
 using namespace llvm;
 
+static cl::opt<int> TargetFPSBisect(DEBUG_TYPE "-bisect", cl::Hidden, cl::init(-1));
+
 static void getLiveRegsAt(const MachineBasicBlock &MBB,
                           MachineBasicBlock::const_iterator MBBI,
                           LivePhysRegs &LPR) {
@@ -98,11 +100,10 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   }
 
   // Collect information about the private stack frame.
-  DenseMap<int, uint64_t> PrivateFrameInfo;
   SmallVector<MachineInstr *> PrivateFrameAccesses;
   Align PrivateFrameAlign;
   uint64_t PrivateFrameSize =
-      collectPrivateFrameObjects(MF, PrivateFrameInfo, PrivateFrameAccesses, PrivateFrameAlign);
+      collectPrivateFrameObjects(MF, PrivateFrameAccesses, PrivateFrameAlign);
 
   if (PrivateFrameSize == 0) {
     // NHM-TODO: It turns out we actually didn't to reserve the PSP register.
@@ -126,7 +127,7 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   }
 
   // Load private stack pointer throughout function.
-  assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses, PrivateFrameInfo);
+  assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses);
 
   // Emit prologue and epilogue for full FPSes.
   if (F.fpsKind() == Function::FullFPS) {
@@ -134,9 +135,8 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     emitEpilogue(MF, PrivateFrameSize);
   }
 
-  // Erase unused stack slots.
-  for (const auto &[FI, _] : PrivateFrameInfo)
-    MFI->RemoveStackObject(FI);
+  // Note: Private stack objects are now marked with StackID::PrivateStack,
+  // so PEI will skip them automatically. No need to remove them.
 
   MF.verify();
 
@@ -153,7 +153,7 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 }
 
 uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
-    MachineFunction &MF, DenseMap<int, uint64_t> &PrivateFrameInfo,
+    MachineFunction &MF,
     SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses,
     Align &PrivateFrameAlign) {
   uint64_t PrivateFrameSize = 0;
@@ -183,7 +183,17 @@ uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
     Align ObjAlign = MFI->getObjectAlign(FI);
     PrivateFrameAlign = std::max(PrivateFrameAlign, ObjAlign);
     PrivateFrameSize = llvm::alignTo(PrivateFrameSize, ObjAlign);
-    PrivateFrameInfo[FI] = PrivateFrameSize;
+
+    int &Bisect = TargetFPSBisect.getValue();
+    if (Bisect != 0) {
+      // Mark the object as belonging to the private stack and assign its offset.
+      MFI->setStackID(FI, TargetStackID::PrivateStack);
+      MFI->setObjectOffset(FI, PrivateFrameSize);
+    }
+    if (Bisect > 0) {
+      --Bisect;
+    }
+
     assert(MFI->getObjectSize(FI) > 0);
     PrivateFrameSize += MFI->getObjectSize(FI);
 
@@ -227,8 +237,7 @@ static bool shouldReloadPSP(const MachineBasicBlock &MBB, MachineBasicBlock::ite
 }
 
 void TargetFunctionPrivateStacks::assignRegsForPrivateStackPointer(
-    MachineFunction &MF, ArrayRef<MachineInstr *> Uses,
-    const DenseMap<int, uint64_t> &PrivateFrameInfo) {
+    MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
 
   const auto IsUse = [&](MachineInstr *MI) { return is_contained(Uses, MI); };
 
@@ -251,7 +260,7 @@ void TargetFunctionPrivateStacks::assignRegsForPrivateStackPointer(
   for (MachineBasicBlock &MBB : MF)
     for (MachineInstr &MI : MBB)
       if (IsUse(&MI))
-        fixupPrivateStackAccess(MI, PrivateFrameInfo);
+        fixupPrivateStackAccess(MI);
 }
 
 const TargetRegisterClass *TargetFunctionPrivateStacks::computeAddrBaseRegClass(
@@ -392,16 +401,15 @@ void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Pri
   }
 }
 
-void TargetFunctionPrivateStacks::fixupPrivateStackAccess(
-    MachineInstr &MI, const DenseMap<int, uint64_t> &PrivateFrameInfo) {
+void TargetFunctionPrivateStacks::fixupPrivateStackAccess(MachineInstr &MI) {
   MachineOperand &BaseMO = getAddrBaseOp(MI);
   MachineOperand &DispMO = getAddrDispOp(MI);
   assert(BaseMO.isFI());
   assert(DispMO.isImm());
   int FI = BaseMO.getIndex();
+  assert(MFI->getStackID(FI) == TargetStackID::PrivateStack);
   BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
-  assert(PrivateFrameInfo.contains(FI));
-  DispMO.setImm(DispMO.getImm() + PrivateFrameInfo.lookup(FI));
+  DispMO.setImm(DispMO.getImm() + MFI->getObjectOffset(FI));
 }
 
 void TargetFunctionPrivateStacks::loadPrivateStackPointerFull(
