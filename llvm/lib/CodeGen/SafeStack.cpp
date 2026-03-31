@@ -58,6 +58,7 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -105,6 +106,7 @@ static cl::opt<bool> SafeStackRealignments("safestack-realignments",
 static cl::opt<bool> ClColoring("safe-stack-coloring",
                                 cl::desc("enable safe stack coloring"),
                                 cl::init(false), cl::Hidden);
+static cl::opt<bool> EnableSafeStack("safestack-enable", cl::init(true), cl::Hidden);
 
 namespace {
 
@@ -912,7 +914,7 @@ public:
   bool runOnFunction(Function &F) override {
     LLVM_DEBUG(dbgs() << "[SafeStack] Function: " << F.getName() << "\n");
 
-    if (!F.hasFnAttribute(Attribute::SafeStack)) {
+    if (!EnableSafeStack || !F.hasFnAttribute(Attribute::SafeStack)) {
       LLVM_DEBUG(dbgs() << "[SafeStack]     safestack is not requested"
                            " for this function\n");
       return false;

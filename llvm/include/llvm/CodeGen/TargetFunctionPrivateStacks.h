@@ -39,7 +39,8 @@ protected:
 
   uint64_t collectPrivateFrameObjects(
       MachineFunction &MF, DenseMap<int, uint64_t> &PrivateFrameInfo,
-      SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses);
+      SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses,
+      Align &PrivateFrameAlign);
 
   bool
   frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF,
@@ -60,7 +61,8 @@ protected:
   void loadPrivateStackPointer(
       MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg);
 
-  void fixupPrivateStackAccess(MachineInstr &MI,
+  virtual void
+  fixupPrivateStackAccess(MachineInstr &MI,
                           const DenseMap<int, uint64_t> &PrivateFrameInfo);
 
   virtual void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,

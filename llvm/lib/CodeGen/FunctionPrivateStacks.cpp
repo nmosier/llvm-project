@@ -12,6 +12,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include "llvm/Support/DebugLog.h"
 
 #define PASS_KEY "fps"
 #define DEBUG_TYPE PASS_KEY
@@ -21,6 +22,7 @@ using namespace llvm;
 namespace llvm {
 
 // NHM-FIXME: Fixup flags.
+// NHM-FIXME: Can make static.
 cl::opt<bool> EnableLeafFPS(PASS_KEY "-leaf", cl::init(true),
                             cl::Hidden);
 STATISTIC(FullFPSCount, "Number of functions with a full FPS");
@@ -33,7 +35,7 @@ cl::opt<bool> EnableFPSStrictMode(
 
 } // namespace llvm
 
-                                                                    
+static cl::opt<bool> EnableFPS(PASS_KEY "-enable", cl::init(true), cl::Hidden);
 
 namespace {
 
@@ -83,12 +85,13 @@ void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &
   // NHM-FIXME: Assert only works on 64-bit architectures.
 
   // Compute the FPS kind.
-
   if (EnableLeafFPS && F.doesNotRecurse()) {
     F.setFPSKind(Function::LeafFPS);
+    LDBG() << "Leaf FPS for " << F.getName();
     ++LeafFPSCount;
   } else {
     F.setFPSKind(Function::FullFPS);
+    LDBG() << "Full FPS for " << F.getName();
     ++FullFPSCount;
   }
 
@@ -105,6 +108,9 @@ void FunctionPrivateStacks::runOnFunction(Function &F, std::vector<Constant *> &
 }
 
 bool FunctionPrivateStacks::run() {
+  if (!EnableFPS)
+    return false;
+
   // Do any functions in this module require a private stack?
   // If not, don't do anything.
   if (none_of(M, [](const Function &F) -> bool {
@@ -124,7 +130,7 @@ bool FunctionPrivateStacks::run() {
 
   // Declare thread-local variable.
   // NHM-FIXME: Not sure if these are necessary at this point.
-  new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stacks");
+  new GlobalVariable(M, PointerType::getUnqual(Ctx), /*isConstant*/false, GlobalVariable::ExternalLinkage, nullptr, "__fps_thd_stacks", nullptr, GlobalVariable::InitialExecTLSModel);
 
   auto *CtorTy = FunctionType::get(Type::getVoidTy(Ctx), {}, /*isVarArg*/false);
   auto *Ctor = Function::Create(CtorTy, Function::InternalLinkage, "__fps_regstack_ctor", M);

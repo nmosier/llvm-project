@@ -12,6 +12,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCRegister.h"
+#include "llvm/Support/DebugLog.h"
 #include "llvm/Support/ErrorHandling.h"
 
 #define DEBUG_TYPE "target-fps"
@@ -49,7 +50,9 @@ MCPhysReg TargetFunctionPrivateStacks::getScratchReg(
 }
 
 bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
-  if (!MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack))
+  Function &F = MF.getFunction();
+  if (!F.hasFnAttribute(Attribute::FunctionPrivateStack) ||
+      F.fpsKind() == Function::NoFPS)
     return false;
   assert(!MF.getName().starts_with("__fps_"));
 
@@ -58,7 +61,6 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   TRI = STI.getRegisterInfo();
   MFI = &MF.getFrameInfo();
   MRI = &MF.getRegInfo();
-  Function &F = MF.getFunction();
   Module &M = *F.getParent();
   LLVMContext &Ctx = M.getContext();
 
@@ -98,12 +100,14 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   // Collect information about the private stack frame.
   DenseMap<int, uint64_t> PrivateFrameInfo;
   SmallVector<MachineInstr *> PrivateFrameAccesses;
+  Align PrivateFrameAlign;
   uint64_t PrivateFrameSize =
-      collectPrivateFrameObjects(MF, PrivateFrameInfo, PrivateFrameAccesses);
+      collectPrivateFrameObjects(MF, PrivateFrameInfo, PrivateFrameAccesses, PrivateFrameAlign);
 
   if (PrivateFrameSize == 0) {
     // NHM-TODO: It turns out we actually didn't to reserve the PSP register.
     // This means that, in theory, we could un-spill some registers.
+    LDBG() << "zero frame size for " << MF.getName() << ", skipping";
     return false;
   }
 
@@ -113,9 +117,10 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     auto *ArrTy = ArrayType::get(Int8Ty, PrivateFrameSize);
     auto *ArrVal = Constant::getNullValue(ArrTy);
     FPSSym = new GlobalVariable(
-        M, ArrTy, /*isConstant*/ false, GlobalVariable::InternalLinkage, ArrVal,
+        M, ArrTy, /*isConstant*/ false, GlobalVariable::ExternalLinkage, ArrVal,
         "__fps_stackframe_" + F.getName(),
         /*InsertBefore*/ nullptr, GlobalVariable::InitialExecTLSModel);
+    FPSSym->setAlignment(PrivateFrameAlign);
     // NHM-FIXME: ^ This should be local dynamic TLS model, not initial exec,
     // ideally. Need to figure out how to integrate use of __tls_get_addr().
   }
@@ -149,15 +154,15 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
 uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
     MachineFunction &MF, DenseMap<int, uint64_t> &PrivateFrameInfo,
-    SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses) {
+    SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses,
+    Align &PrivateFrameAlign) {
   uint64_t PrivateFrameSize = 0;
-  Align PrivateFrameAlign;
   for (int FI = MFI->getObjectIndexBegin(); FI < MFI->getObjectIndexEnd(); ++FI) {
     if (MFI->isFixedObjectIndex(FI))
       continue;
     SmallVector<MachineOperand *> Uses;
     if (!frameIndexOnlyUsedInMemoryOperands(FI, MF, Uses)) {
-      LLVM_DEBUG(dbgs() << "skipping frame index " << FI << " which has a non-memory-operand use\n");
+      LDBG() << "skipping frame index " << FI << " which has a non-memory-operand use";
       continue;
     }
     if (Uses.empty())
@@ -170,8 +175,8 @@ uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
       return RC->contains(PSPReg);
     };
     if (!llvm::all_of(Uses, CompatibleUse)) {
-      LLVM_DEBUG(dbgs() << "skipping frame index " << FI
-                        << " since the PSP reg has an incompatible class\n");
+      LDBG() << "skipping frame index " << FI
+             << " since the PSP reg has an incompatible class";
       continue;
     }
 

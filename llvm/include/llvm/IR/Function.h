@@ -1072,7 +1072,7 @@ public:
   };
 
 private:
-  FPSKind FpsKind;
+  FPSKind FpsKind = FPSKind::NoFPS;
 
 public:
   FPSKind fpsKind() const { return FpsKind; }
