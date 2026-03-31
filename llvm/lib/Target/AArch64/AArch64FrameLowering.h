@@ -132,6 +132,7 @@ public:
     case TargetStackID::ScalableVector:
     case TargetStackID::ScalablePredicateVector:
     case TargetStackID::NoAlloc:
+    case TargetStackID::PrivateStack:
       return true;
     }
   }

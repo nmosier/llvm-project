@@ -1354,6 +1354,11 @@ StackOffset AArch64FrameLowering::resolveFrameIndexReference(
   int64_t ObjectOffset = MFI.getObjectOffset(FI);
   bool isFixed = MFI.isFixedObjectIndex(FI);
   auto StackID = static_cast<TargetStackID::Value>(MFI.getStackID(FI));
+  if (StackID == TargetStackID::PrivateStack) {
+    // NHM-FIXME: Should NOT hardcode this!
+    FrameReg = AArch64::X15;
+    return StackOffset::getFixed(ObjectOffset);
+  }
   return resolveFrameOffsetReference(MF, ObjectOffset, isFixed, StackID,
                                      FrameReg, PreferFP, ForSimm);
 }

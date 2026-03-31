@@ -13,6 +13,7 @@
 #include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/PseudoSourceValue.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetFunctionPrivateStacks.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -134,31 +135,22 @@ private:
                           MachineBasicBlock::iterator MBBI, Register Dest,
                           Register Src) const override;
 
-  void fixupPrivateStackAccess(
-      MachineInstr &MI,
-      const DenseMap<int, uint64_t> &PrivateFrameInfo) override {
+  void fixupPrivateStackAccess(MachineInstr &MI) override {
+
+    LDBG() << "before: " << MI;
 
     for (const MachineOperand &MO : MI.operands()) {
       if (MO.isFI()) {
+        int FI = MO.getIndex();
+        // NHM-FIXME: This is just for debugging, so remove later.
+        if (MFI->getStackID(FI) != TargetStackID::PrivateStack)
+          continue;
+        assert(MFI->getStackID(FI) == TargetStackID::PrivateStack);
         TRI()->eliminateFrameIndex(MI.getIterator(), /*SPAdj*/0, MO.getOperandNo(), nullptr);
       }
     }
-    
-#if 0
-    // Make sure the fixed up offset would actually fit.
-    int FI = getAddrBaseOp(MI).getIndex();
-    std::optional<ExtAddrMode> EAM = TII()->getAddrModeFromMemoryOp(MI, TRI);
-    assert(EAM && "Expected EAM!");
-    auto Disp = EAM->Displacement + PrivateFrameInfo.at(FI);
-    StackOffset SO = StackOffset::getFixed(Disp);
-    // NHM-FIXME: Should look at offset, if there is one? 
-    if (isAArch64FrameOffsetLegal(MI, SO) == AArch64FrameOffsetCannotUpdate)
-      report_fatal_error("illegal frame offset!");
-#endif
 
-#if 0 
-    TargetFunctionPrivateStacks::fixupPrivateStackAccess(MI, PrivateFrameInfo);
-#endif
+    LDBG() << "after: " << MI;
 
     // Remove any FixedStackPseudoSourceValue MachineMemOperands.
     if (!MI.hasOneMemOperand())
@@ -176,6 +168,7 @@ private:
 
 } // namespace
 
+// NHM-FIXME: Remove scratch reg interface!
 void AArch64FunctionPrivateStacks::getPointerToFPSData(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
     const GlobalVariable *Member, MCPhysReg DestReg,
@@ -251,12 +244,12 @@ void AArch64FunctionPrivateStacks::loadPrivateStackPointerLeaf(
 
   BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADRP), ScratchReg)
       .addGlobalAddress(FPSSym, 0, AArch64II::MO_TLS | AArch64II::MO_PAGE);
-  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDRXui), Reg)
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDRXui), ScratchReg)
       .addReg(ScratchReg)
       .addGlobalAddress(FPSSym, 0,
                         AArch64II::MO_TLS | AArch64II::MO_PAGEOFF |
                             AArch64II::MO_NC);
-  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::MRS), ScratchReg)
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::MRS), Reg)
       .addImm(AArch64SysReg::TPIDR_EL0);
   BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::ADDXrr), Reg)
       .addReg(Reg)
@@ -295,7 +288,7 @@ void AArch64FunctionPrivateStacks::emitPrologueCheck(
 
   // Regs[0]->current_frame = TmpReg;
   BuildMI(CheckMBB, CheckMBB.end(), Loc, TII()->get(AArch64::STRXui))
-      .addReg(TmpReg)
+      .addReg(Regs[1])
       .addReg(Regs[0])
       .addImm(0); // offsetof_fps_current_frame = 0 (scaled: 0/8 = 0)
 }

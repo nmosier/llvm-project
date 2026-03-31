@@ -522,8 +522,10 @@ AArch64RegisterInfo::getStrictlyReservedRegs(const MachineFunction &MF) const {
   // NHM-FIXME: Remove the 'Function' prefix from this attribute; it's
   // redundant.
   // NHM-FIXME: Use shared def of AArch::X15.
+  // NHM-FIXME: Ideally, we should have different (sub)attributes with different
+  // types of stacks, e.g., privatestack(full) or privatestack(leaf).
   if (MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack))
-    markSuperRegs(Reserved, AArch64::X15);
+    markSuperRegs(Reserved, AArch64::W15);
 
   return Reserved;
 }
