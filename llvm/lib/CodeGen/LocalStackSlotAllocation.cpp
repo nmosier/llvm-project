@@ -32,6 +32,7 @@
 #include "llvm/Pass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/DebugLog.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cassert>
@@ -134,6 +135,11 @@ INITIALIZE_PASS(LocalStackSlotPass, DEBUG_TYPE,
                 "Local Stack Slot Allocation", false, false)
 
 bool LocalStackSlotImpl::runOnMachineFunction(MachineFunction &MF) {
+  if (MF.getFunction().hasFnAttribute(Attribute::FunctionPrivateStack)) {
+    LDBG() << "skipping " << MF.getName() << " because it has a private stack";
+    return false;
+  }
+
   MachineFrameInfo &MFI = MF.getFrameInfo();
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
   unsigned LocalObjectCount = MFI.getObjectIndexEnd();
