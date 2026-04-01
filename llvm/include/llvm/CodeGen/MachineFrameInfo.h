@@ -584,6 +584,8 @@ public:
            "Invalid Object Idx!");
     assert(!isDeadObjectIndex(ObjectIdx) &&
            "Setting frame offset for a dead object?");
+    // FPS sanity check.
+    assert(getStackID(ObjectIdx) != TargetStackID::PrivateStack || SPOffset >= 0);
     Objects[ObjectIdx+NumFixedObjects].SPOffset = SPOffset;
   }
 
