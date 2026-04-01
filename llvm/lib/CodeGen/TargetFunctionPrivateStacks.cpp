@@ -172,6 +172,9 @@ uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
 
     auto CompatibleUse = [&](const MachineOperand *MO) -> bool {
       const MachineInstr &MI = *MO->getParent();
+      // For now, all debug uses are allowed.
+      if (MI.isDebugInstr())
+        return true;
       const TargetRegisterClass *RC =
           MI.getRegClassConstraint(MO->getOperandNo(), TII, TRI);
       return RC->contains(PSPReg);
