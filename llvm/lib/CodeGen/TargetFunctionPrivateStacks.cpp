@@ -112,6 +112,8 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
     return false;
   }
 
+  LDBG() << MF.getName() << " frame size is " << PrivateFrameSize;
+
   // LeafFPS: Create the stack frame.
   if (F.fpsKind() == Function::LeafFPS) {
     auto *Int8Ty = IntegerType::get(Ctx, 8);
