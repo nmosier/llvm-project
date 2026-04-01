@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <pthread.h>
+#include <stdarg.h>
 
 #include "safestack/safestack_platform.h"
 
@@ -20,28 +21,23 @@
 #define FPS_ABORT() abort()
 #endif
 
-#define FPS_CHECK(a)                                            \
-  do {                                                          \
-    if (!(a)) {                                                 \
-      fprintf(stderr, "fps CHECK failed: %s:%d %s\n", __FILE__, \
-              __LINE__, #a);                                    \
-      FPS_ABORT();                                              \
-    }                                                           \
+#define FPS_CHECK(a)                                                           \
+  do {                                                                         \
+    if (!(a)) {                                                                \
+      fprintf(stderr, "fps CHECK failed: %s:%d %s\n", __FILE__, __LINE__, #a); \
+      FPS_ABORT();                                                             \
+    }                                                                          \
   } while (false)
 
-#define FPS_LOGGING 0
+#define FPS_LOGGING 1
+
 #if FPS_LOGGING
-# define FPS_LOG(...)                                   \
-  do {                                                  \
-    pthread_mutex_lock(&log_mutex);                     \
-    fprintf(stderr, "[fps:%d] ", safestack::GetTid());  \
-    fprintf(stderr, __VA_ARGS__);                       \
-    fprintf(stderr, "\n");                              \
-    pthread_mutex_unlock(&log_mutex);                   \
-  } while (false)
+# define FPS_LOG(...) fps_log(__VA_ARGS__)
 #else
 # define FPS_LOG(...) do {} while (false)
 #endif
+
+void fps_log(const char *fmt, ...);
 
 inline void *operator new(size_t count, void *here) { return here; }
 

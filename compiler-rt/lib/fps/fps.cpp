@@ -42,6 +42,27 @@
 
 using namespace __fps; // NHM-FIXME: Shouldn't need this later on.
 
+void fps_log(const char *fmt, ...) {
+  static bool read_env_var = true;
+  static bool env_var = false;
+  if (read_env_var) {
+    const char *s = getenv("FPS_LOG");
+    env_var = s && atoi(s);
+    read_env_var = false;
+  }
+  if (!env_var) {
+    return;
+  }
+  va_list ap;
+  va_start(ap, fmt);
+  pthread_mutex_lock(&log_mutex);
+  fprintf(stderr, "[fps:%d] ", safestack::GetTid());
+  vfprintf(stderr, fmt, ap);
+  fprintf(stderr, "\n");
+  pthread_mutex_unlock(&log_mutex);
+  va_end(ap);
+}
+
 // NHM-FIXME: fps -> __fps.
 namespace fps {
 
@@ -121,7 +142,7 @@ struct fps_t {
 
 private:
   size_t getFrameAllocSize() const {
-    return sizeof(fps_t) + private_frame_size;
+    return sizeof(frame_t) + private_frame_size;
   }
 
 public:
@@ -194,6 +215,8 @@ public:
     current_frame->next = new_frame;
     new_frame->prev = current_frame;
     new_frame->next = new_frame;
+
+    FPS_LOG("morestack: new frame @ %p\n", new_frame);
   }
 };
 
