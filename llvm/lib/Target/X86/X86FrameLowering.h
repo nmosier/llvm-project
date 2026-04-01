@@ -337,6 +337,17 @@ private:
   // any instructions from related sequence.
   bool skipSpillFPBP(MachineFunction &MF,
                      MachineBasicBlock::reverse_iterator &MI) const;
+
+  bool isSupportedStackID(TargetStackID::Value ID) const override {
+    switch (ID) {
+    default:
+      return false;
+    case TargetStackID::Default:
+    case TargetStackID::NoAlloc:
+    case TargetStackID::PrivateStack:
+      return true;
+    }
+  }
 };
 
 } // End llvm namespace
