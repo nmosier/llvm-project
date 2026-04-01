@@ -959,7 +959,8 @@ void PEIImpl::calculateFrameObjectOffsets(MachineFunction &MF) {
 
     // Resolve offsets for objects in the local block.
     for (unsigned i = 0, e = MFI.getLocalFrameObjectCount(); i != e; ++i) {
-      switch (MFI.getStackID(i)) {
+      std::pair<int, int64_t> Entry = MFI.getLocalFrameObjectMap(i);
+      switch (MFI.getStackID(Entry.first)) {
       case TargetStackID::PrivateStack:
         continue;
       case TargetStackID::Default:
@@ -967,7 +968,6 @@ void PEIImpl::calculateFrameObjectOffsets(MachineFunction &MF) {
       default:
         report_fatal_error("bad stack id!");
       }
-      std::pair<int, int64_t> Entry = MFI.getLocalFrameObjectMap(i);
       int64_t FIOffset = (StackGrowsDown ? -Offset : Offset) + Entry.second;
       LLVM_DEBUG(dbgs() << "alloc FI(" << Entry.first << ") at SP[" << FIOffset
                         << "]\n");
