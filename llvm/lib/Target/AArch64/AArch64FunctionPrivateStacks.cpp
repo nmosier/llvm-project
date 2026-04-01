@@ -78,25 +78,7 @@ private:
 
   // NHM-FIXME: This could be made less redundant.
   bool checkFrameIndex(const MachineOperand &MO) const override {
-#if 0
-    const MachineInstr &MI = *MO.getParent();
-    if (!MI.mayLoadOrStore())
-      return false;
-    const MachineOperand &BaseMO = getLdStBaseOp(MI);
-    if (&BaseMO != &MO)
-      return false;
-    // Finally, check if this has a displacement operand.
-    // If not, bail. We could support this in the future, though,
-    // by rewriting it.
-    // NOTE: Got this list from the implementation of
-    // llvm::isAArch64FrameOffsetLegal
-    if (!doesLdStHaveImmOffset(MI.getOpcode()))
-      return false;
-
     return true;
-#else
-    return true;
-#endif
   }
 
   bool instrumentSetjmps(MachineFunction &MF) override {
@@ -105,9 +87,11 @@ private:
   }
 
   MachineOperand &getAddrBaseOp(MachineInstr &MI) const override {
+    // NHM-FIXME: Should remove.
     return getLdStBaseOp(MI);
   }
   MachineOperand &getAddrDispOp(MachineInstr &MI) const override {
+    // NHM-FIXME: Should remove.
     return getLdStOffsetOp(MI);
   }
 
