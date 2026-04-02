@@ -46,8 +46,6 @@ protected:
   frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF,
                                      SmallVectorImpl<MachineOperand *> &Uses);
 
-  virtual bool checkFrameIndex(const MachineOperand &MO) const = 0;
-
   void assignRegsForPrivateStackPointer(
       MachineFunction &MF, ArrayRef<MachineInstr *> Uses);
 
@@ -59,8 +57,6 @@ protected:
 
   void loadPrivateStackPointer(
       MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Reg);
-
-  virtual void fixupPrivateStackAccess(MachineInstr &MI);
 
   virtual void loadPrivateStackPointerLeaf(MachineBasicBlock &MBB,
                                            MachineBasicBlock::iterator MBBI,
@@ -76,9 +72,6 @@ protected:
   virtual void emitEpilogueImpl(MachineBasicBlock &MBB,
                                 MachineBasicBlock::iterator MBBI,
                                 std::array<MCPhysReg, 2> Regs) = 0;
-
-  virtual MachineOperand &getAddrBaseOp(MachineInstr &MI) const = 0;
-  virtual MachineOperand &getAddrDispOp(MachineInstr &MI) const = 0;
 
   virtual void loadRegFromBaseReg(MachineBasicBlock &MBB,
                                   MachineBasicBlock::iterator MBBI,

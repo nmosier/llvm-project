@@ -63,8 +63,6 @@ private:
     return static_cast<const X86RegisterInfo *>(TRI)->hasBasePointer(MF);
   }
 
-  bool checkFrameIndex(const MachineOperand &MO) const override;
-
   // NHM-FIXME: No longer need pointer to member.
   void getPointerToFPSData(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, const GlobalVariable *Member, MCPhysReg DestReg, MCPhysReg _ = X86::NoRegister) const override;
 
@@ -95,14 +93,6 @@ private:
     const int MemRefIdx = X86::getFirstAddrOperandIdx(MI);
     assert(MemRefIdx >= 0);
     return MI.getOperand(MemRefIdx + OpIdx);
-  }
-
-  MachineOperand &getAddrBaseOp(MachineInstr &MI) const override {
-    return getAddrOp(MI, X86::AddrBaseReg);
-  }
-
-  MachineOperand &getAddrDispOp(MachineInstr &MI) const override {
-    return getAddrOp(MI, X86::AddrDisp);
   }
 
   void loadRegFromBaseReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, Register Dest, Register Src) const override {
@@ -306,15 +296,6 @@ bool X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
 
 
   return true;
-}
-
-bool X86FunctionPrivateStacks::checkFrameIndex(const MachineOperand &MO) const {
-#if 0
-  const int MemRefBeginIdx = X86::getFirstAddrOperandIdx(*MO.getParent());
-  return MemRefBeginIdx >= 0 && MO.getOperandNo() == static_cast<unsigned>(MemRefBeginIdx + X86::AddrBaseReg);
-#else
-  return true;
-#endif
 }
 
 void X86FunctionPrivateStacks::emitPrologueCheck(MachineBasicBlock &CheckMBB,

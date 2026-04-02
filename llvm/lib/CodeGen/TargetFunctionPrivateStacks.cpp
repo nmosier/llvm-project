@@ -171,7 +171,6 @@ uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
       continue;
 
     auto CompatibleUse = [&](const MachineOperand *MO) -> bool {
-      // NHM-FIXME: I actually think all uses are compatible...
       const MachineInstr &MI = *MO->getParent();
       // For now, all debug uses are allowed.
       if (MI.isDebugInstr())
@@ -219,8 +218,6 @@ bool TargetFunctionPrivateStacks::frameIndexOnlyUsedInMemoryOperands(int FI, Mac
       for (MachineOperand &MO : MI.operands()) {
         if (!(MO.isFI() && MO.getIndex() == FI))
           continue;
-        if (!checkFrameIndex(MO))
-          return false;
         Uses.push_back(&MO);
       }
     }
@@ -263,12 +260,6 @@ void TargetFunctionPrivateStacks::assignRegsForPrivateStackPointer(
         break;
     }
   }
-
-  // Fixup uses with PSP reg.
-  for (MachineBasicBlock &MBB : MF)
-    for (MachineInstr &MI : MBB)
-      if (IsUse(&MI))
-        fixupPrivateStackAccess(MI);
 }
 
 const TargetRegisterClass *TargetFunctionPrivateStacks::computeAddrBaseRegClass(
@@ -407,19 +398,6 @@ void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Pri
 
     emitEpilogueImpl(MBB, MBBI, Regs);
   }
-}
-
-void TargetFunctionPrivateStacks::fixupPrivateStackAccess(MachineInstr &MI) {
-#if 0
-  MachineOperand &BaseMO = getAddrBaseOp(MI);
-  MachineOperand &DispMO = getAddrDispOp(MI);
-  assert(BaseMO.isFI());
-  assert(DispMO.isImm());
-  int FI = BaseMO.getIndex();
-  assert(MFI->getStackID(FI) == TargetStackID::PrivateStack);
-  BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
-  DispMO.setImm(DispMO.getImm() + MFI->getObjectOffset(FI));
-#endif
 }
 
 void TargetFunctionPrivateStacks::loadPrivateStackPointerFull(

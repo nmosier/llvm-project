@@ -76,23 +76,9 @@ private:
     return MI.getOperand(getLdStOffsetIdx(MI));
   }
 
-  // NHM-FIXME: This could be made less redundant.
-  bool checkFrameIndex(const MachineOperand &MO) const override {
-    return true;
-  }
-
   bool instrumentSetjmps(MachineFunction &MF) override {
     // NHM-FIXME: Should handle external setjmps at least...
     return false;
-  }
-
-  MachineOperand &getAddrBaseOp(MachineInstr &MI) const override {
-    // NHM-FIXME: Should remove.
-    return getLdStBaseOp(MI);
-  }
-  MachineOperand &getAddrDispOp(MachineInstr &MI) const override {
-    // NHM-FIXME: Should remove.
-    return getLdStOffsetOp(MI);
   }
 
   MachineOperand getCondEqualMO() const override {
@@ -122,11 +108,6 @@ private:
   void loadRegFromBaseReg(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI, Register Dest,
                           Register Src) const override;
-
-  void fixupPrivateStackAccess(MachineInstr &MI) override {
-    // NHM-FIXME: Should eliminate this entirely, eventually.
-    LDBG() << "not fixing up private stack access";
-  }
 };
 
 } // namespace
