@@ -39,15 +39,13 @@ protected:
 
   uint64_t collectPrivateFrameObjects(
       MachineFunction &MF,
-      SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses,
       Align &PrivateFrameAlign);
 
   bool
   frameIndexOnlyUsedInMemoryOperands(int FI, MachineFunction &MF,
                                      SmallVectorImpl<MachineOperand *> &Uses);
 
-  void assignRegsForPrivateStackPointer(
-      MachineFunction &MF, ArrayRef<MachineInstr *> Uses);
+  void assignRegsForPrivateStackPointer(MachineFunction &MF);
 
   void emitPrologue(MachineFunction &MF, unsigned PrivateFrameSize);
   void emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize);

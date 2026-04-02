@@ -100,10 +100,9 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   }
 
   // Collect information about the private stack frame.
-  SmallVector<MachineInstr *> PrivateFrameAccesses;
   Align PrivateFrameAlign;
   uint64_t PrivateFrameSize =
-      collectPrivateFrameObjects(MF, PrivateFrameAccesses, PrivateFrameAlign);
+      collectPrivateFrameObjects(MF, PrivateFrameAlign);
 
   if (PrivateFrameSize == 0) {
     // NHM-TODO: It turns out we actually didn't to reserve the PSP register.
@@ -129,7 +128,7 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   }
 
   // Load private stack pointer throughout function.
-  assignRegsForPrivateStackPointer(MF, PrivateFrameAccesses);
+  assignRegsForPrivateStackPointer(MF);
 
   // Emit prologue and epilogue for full FPSes.
   if (F.fpsKind() == Function::FullFPS) {
@@ -156,7 +155,6 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
 
 uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
     MachineFunction &MF,
-    SmallVectorImpl<MachineInstr *> &PrivateFrameAccesses,
     Align &PrivateFrameAlign) {
   uint64_t PrivateFrameSize = 0;
   for (int FI = MFI->getObjectIndexBegin(); FI < MFI->getObjectIndexEnd(); ++FI) {
@@ -203,11 +201,6 @@ uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
 
     assert(MFI->getObjectSize(FI) > 0);
     PrivateFrameSize += MFI->getObjectSize(FI);
-
-    for (MachineOperand *UseOp : Uses) {
-      MachineInstr *MI = UseOp->getParent();
-      PrivateFrameAccesses.push_back(MI);
-    }
   }
   return llvm::alignTo(PrivateFrameSize, PrivateFrameAlign);
 }
@@ -242,9 +235,7 @@ static bool shouldReloadPSP(const MachineBasicBlock &MBB, MachineBasicBlock::ite
 }
 
 void TargetFunctionPrivateStacks::assignRegsForPrivateStackPointer(
-    MachineFunction &MF, ArrayRef<MachineInstr *> Uses) {
-
-  const auto IsUse = [&](MachineInstr *MI) { return is_contained(Uses, MI); };
+    MachineFunction &MF) {
 
   // Load stack pointer.
   // Insertion points:
