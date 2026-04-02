@@ -171,12 +171,15 @@ uint64_t TargetFunctionPrivateStacks::collectPrivateFrameObjects(
       continue;
 
     auto CompatibleUse = [&](const MachineOperand *MO) -> bool {
+      // NHM-FIXME: I actually think all uses are compatible...
       const MachineInstr &MI = *MO->getParent();
       // For now, all debug uses are allowed.
       if (MI.isDebugInstr())
         return true;
       const TargetRegisterClass *RC =
           MI.getRegClassConstraint(MO->getOperandNo(), TII, TRI);
+      if (!RC && MI.isInlineAsm())
+        return true;
       return RC->contains(PSPReg);
     };
     if (!llvm::all_of(Uses, CompatibleUse)) {
@@ -407,6 +410,7 @@ void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Pri
 }
 
 void TargetFunctionPrivateStacks::fixupPrivateStackAccess(MachineInstr &MI) {
+#if 0
   MachineOperand &BaseMO = getAddrBaseOp(MI);
   MachineOperand &DispMO = getAddrDispOp(MI);
   assert(BaseMO.isFI());
@@ -415,6 +419,7 @@ void TargetFunctionPrivateStacks::fixupPrivateStackAccess(MachineInstr &MI) {
   assert(MFI->getStackID(FI) == TargetStackID::PrivateStack);
   BaseMO.ChangeToRegister(PSPReg, /*isDef*/ false);
   DispMO.setImm(DispMO.getImm() + MFI->getObjectOffset(FI));
+#endif
 }
 
 void TargetFunctionPrivateStacks::loadPrivateStackPointerFull(

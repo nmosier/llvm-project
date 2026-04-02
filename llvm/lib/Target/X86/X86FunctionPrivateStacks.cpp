@@ -309,8 +309,12 @@ bool X86FunctionPrivateStacks::instrumentSetjmps(MachineFunction &MF) {
 }
 
 bool X86FunctionPrivateStacks::checkFrameIndex(const MachineOperand &MO) const {
+#if 0
   const int MemRefBeginIdx = X86::getFirstAddrOperandIdx(*MO.getParent());
   return MemRefBeginIdx >= 0 && MO.getOperandNo() == static_cast<unsigned>(MemRefBeginIdx + X86::AddrBaseReg);
+#else
+  return true;
+#endif
 }
 
 void X86FunctionPrivateStacks::emitPrologueCheck(MachineBasicBlock &CheckMBB,
