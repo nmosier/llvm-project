@@ -264,32 +264,28 @@ void AArch64FunctionPrivateStacks::emitPrologueAlloc(
 void AArch64FunctionPrivateStacks::emitEpilogueImpl(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
     std::array<MCPhysReg, 2> Regs) {
-  // fps_t *Regs[0] = <TLS address of ThdStacksSym>;
-  // frame_t *Regs[1] = Regs[0]->current_frame;
-  // Regs[1] = Regs[1]->prev;
-  // Regs[0]->current_frame = Regs[1];
-  //
-  // AArch64's getPointerToFPSData needs a scratch register. Regs[1] (PSPReg)
-  // is used as scratch and gets clobbered, so we re-load current_frame from
-  // fps.current_frame rather than relying on PSPReg to hold it directly.
+  auto [ScratchReg, PSPReg] = Regs;
+  // frame_t *Reg1 = PSPReg.
+  // Regs[0] = ScratchReg.
+  // PSPReg->current_frame_ptr = PSPReg->prev
+  // Maps to:
+  // load ScratchReg, [PSPReg, -16]
+  // store ScratchReg, [PSPReg, -24]
 
-  // Regs[0] = &fps_data  (Regs[1] used as scratch, gets clobbered)
-  getPointerToFPSData(MBB, MBBI, ThdStacksSym, Regs[0], Regs[1]);
-
-  // Regs[1] = fps_data.current_frame  (offsetof_fps_current_frame = 0, scaled)
-  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDRXui), Regs[1])
-      .addReg(Regs[0])
-      .addImm(0);
-
-  // Regs[1] = current_frame->prev  (offsetof_frame_prev = -16, unscaled)
-  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDURXi), Regs[1])
-      .addReg(Regs[1])
+  // load ScratchReg, [PSPReg, -16]
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDURXi), ScratchReg)
+      .addReg(PSPReg)
       .addImm(-16);
 
-  // fps_data.current_frame = Regs[1]  (offsetof_fps_current_frame = 0, scaled)
-  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::STRXui))
-      .addReg(Regs[1])
-      .addReg(Regs[0])
+  // load PSPReg, [PSPReg, -24]
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::LDURXi), PSPReg)
+      .addReg(PSPReg)
+      .addImm(-24);
+
+  // store ScratchReg, [PSPReg, -24]
+  BuildMI(MBB, MBBI, Loc, TII()->get(AArch64::STURXi))
+      .addReg(ScratchReg)
+      .addReg(PSPReg)
       .addImm(0);
 }
 
