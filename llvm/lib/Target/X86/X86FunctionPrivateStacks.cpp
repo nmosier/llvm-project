@@ -39,7 +39,8 @@ cl::opt<bool> EnableOverflowChecks(
 // NHM-FIXME: Make structs for these.
 constexpr int offsetof_fps_current_frame = 0; // offsetof(fps_t, current_frame)
 constexpr int offsetof_frame_prev = -16; // offsetof(frame_t, prev)
-constexpr int offsetof_frame_next = -8; // offsetof(frame_t, next)
+constexpr int offsetof_frame_next = -8;  // offsetof(frame_t, next)
+constexpr int offsetof_frame_current_frame_ptr = -24; // offsetof(frame_t, current_frame_ptr)
 
 // NHM-FIXME: This must be implemented somewhere.
 // NHM-FIXME: use llvm::alignTo
@@ -363,24 +364,32 @@ void X86FunctionPrivateStacks::emitPrologueAlloc(MachineBasicBlock &AllocMBB, st
 void X86FunctionPrivateStacks::emitEpilogueImpl(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
     std::array<MCPhysReg, 2> Regs) {
-  // fps_t *r0 = ...;
-  // frame_t *r1 = r0->current_frame;
-  // r1 = r1->prev;
-  // r0->current_frame = r1;
-  getPointerToFPSData(MBB, MBBI, ThdStacksSym, Regs[0]);
-  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), Regs[1])
-      .addReg(Regs[1])
+  auto [ScratchReg, PSPReg] = Regs;
+
+  // load ScratchReg, [PSPReg - 16]
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
+      .addReg(PSPReg)
       .addImm(1)
       .addReg(X86::NoRegister)
       .addImm(offsetof_frame_prev)
       .addReg(X86::NoRegister);
-  BuildMI(MBB, MBBI, DebugLoc(), TII->get(X86::MOV64mr))
-      .addReg(Regs[0])
+
+  // load PSPReg, [PSPReg - 24]
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), PSPReg)
+      .addReg(PSPReg)
       .addImm(1)
       .addReg(X86::NoRegister)
-      .addImm(offsetof_fps_current_frame)
+      .addImm(offsetof_frame_current_frame_ptr)
+      .addReg(X86::NoRegister);
+
+  // store ScratchReg, [PSPReg]
+  BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64mr))
+      .addReg(PSPReg)
+      .addImm(1)
       .addReg(X86::NoRegister)
-      .addReg(Regs[1]);
+      .addImm(0)
+      .addReg(X86::NoRegister)
+      .addReg(ScratchReg);
 }
 
 } // end namespace

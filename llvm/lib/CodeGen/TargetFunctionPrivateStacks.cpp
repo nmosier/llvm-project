@@ -367,7 +367,7 @@ void TargetFunctionPrivateStacks::emitPrologue(MachineFunction &MF,
     TII->loadRegFromStackSlot(AllocMBB, AllocMBB.end(), Reg, FI, RC, /*VReg*/MCRegister::NoRegister);
   }
   TII->insertUnconditionalBranch(AllocMBB, &CheckMBB, DebugLoc());  
-  AllocMBB.addSuccessor(&CheckMBB);  
+  AllocMBB.addSuccessor(&CheckMBB);
 }
 
 void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {

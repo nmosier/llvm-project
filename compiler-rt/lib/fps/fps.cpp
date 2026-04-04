@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/resource.h>
@@ -102,6 +103,10 @@ public:
 
 // NHM-FIXME: Class-ify this.
 struct frame_t {
+  /// Padding to ensure this header is 16-byte-aligned.
+  uint64_t pad;
+  /// Pointer into fps_t's current frame, for easy updating.
+  frame_handle_t *current_frame_ptr;
   frame_handle_t prev;
   frame_handle_t next;
 };
@@ -157,8 +162,11 @@ public:
 
     this->private_frame_size = private_frame_size;
 
-    current_frame = (frame_t *) malloc(getFrameAllocSize());
+    // NHM-FIXME: Should ensure this is properly aligned.
+    current_frame = (frame_t *)malloc(getFrameAllocSize());
+    // NHM-FIXME: Should initialize this.
     FPS_CHECK(current_frame);
+    current_frame->current_frame_ptr = &current_frame;
     current_frame->prev = current_frame;
     current_frame->next = current_frame;
 
@@ -213,6 +221,7 @@ public:
     frame_t *new_frame = (frame_t *) malloc(private_frame_size + sizeof(frame_t));
     FPS_CHECK(new_frame);
     current_frame->next = new_frame;
+    new_frame->current_frame_ptr = &current_frame;
     new_frame->prev = current_frame;
     new_frame->next = new_frame;
 
