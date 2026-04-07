@@ -532,6 +532,10 @@ void X86PassConfig::addPreRegAlloc() {
     addPass(createX86PreTileConfigLegacyPass());
   else
     addPass(createX86FastPreTileConfigLegacyPass());
+
+  // Need to run this pre-regalloc, since we need to zero out
+  // since ECX must be zero and EAX, EDX are clobbered.
+  addPass(createX86LockboxPass());
 }
 
 void X86PassConfig::addMachineSSAOptimization() {
@@ -548,7 +552,8 @@ void X86PassConfig::addPostRegAlloc() {
   // analyses needed by the LVIHardening pass when compiling at -O0.
   if (getOptLevel() != CodeGenOptLevel::None)
     addPass(createX86LoadValueInjectionLoadHardeningPass());
-  addPass(createX86FunctionPrivateStacksPass()); // NHM-FIXME: Probably need to move this elsewhere.  
+  addPass(createX86FunctionPrivateStacksPass()); // NHM-FIXME: Probably need to
+                                                 // move this elsewhere.
 }
 
 void X86PassConfig::addPreSched2() {

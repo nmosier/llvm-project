@@ -826,6 +826,7 @@ void AArch64PassConfig::addPostRegAlloc() {
     addPass(createAArch64A57FPLoadBalancing());
 
   addPass(createAArch64FunctionPrivateStacksPass());
+  addPass(createAArch64LockboxPass());
 }
 
 void AArch64PassConfig::addPreSched2() {

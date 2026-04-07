@@ -354,6 +354,7 @@ FunctionPass *createX86SpeculativeExecutionSideEffectSuppression();
 FunctionPass *createX86ArgumentStackSlotPass();
 FunctionPass *createX86SerberusPass();
 FunctionPass *createX86FunctionPrivateStacksPass();
+FunctionPass *createX86LockboxPass();
 
 void initializeCompressEVEXLegacyPass(PassRegistry &);
 void initializeX86FixupBWInstLegacyPass(PassRegistry &);
@@ -394,6 +395,7 @@ void initializeX86WinEHUnwindV2Pass(PassRegistry &);
 void initializeX86PreLegalizerCombinerPass(PassRegistry &);
 void initializeX86SerberusPassPass(PassRegistry &);
 void initializeX86FunctionPrivateStacksPass(PassRegistry &);
+void initializeX86LockboxPass(PassRegistry &);
 
 namespace X86AS {
 enum : unsigned {

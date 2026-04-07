@@ -89,6 +89,7 @@ set(sources
   X86MinimumDirectedMulticut.cpp
   X86Serberus.cpp
   X86FunctionPrivateStacks.cpp
+  X86Lockbox.cpp
   GISel/X86CallLowering.cpp
   GISel/X86InstructionSelector.cpp
   GISel/X86LegalizerInfo.cpp
