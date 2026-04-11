@@ -354,7 +354,7 @@ FunctionPass *createX86SpeculativeExecutionSideEffectSuppression();
 FunctionPass *createX86ArgumentStackSlotPass();
 FunctionPass *createX86SerberusPass();
 FunctionPass *createX86FunctionPrivateStacksPass();
-FunctionPass *createX86LockboxPass();
+FunctionPass *createX86LockboxPass(bool Lower = false);
 
 void initializeCompressEVEXLegacyPass(PassRegistry &);
 void initializeX86FixupBWInstLegacyPass(PassRegistry &);

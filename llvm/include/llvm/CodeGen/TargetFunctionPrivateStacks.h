@@ -37,6 +37,8 @@ protected:
 
   virtual bool hasBasePointer(const MachineFunction &MF) const = 0;
 
+  virtual bool isLockboxInstr(const MachineInstr &MI) const = 0;
+
   uint64_t collectPrivateFrameObjects(
       MachineFunction &MF,
       Align &PrivateFrameAlign);
@@ -90,6 +92,11 @@ protected:
   MCPhysReg getScratchReg(const MachineBasicBlock &MBB,
                           MachineBasicBlock::const_iterator MBBI,
                           ArrayRef<MCPhysReg> Blacklist = {}) const;
+
+private:
+  MachineBasicBlock::iterator
+  getPrologueInsertionPoint(MachineBasicBlock &MBB) const;
+  MachineBasicBlock::iterator getEpilogueInsertionPoint(MachineInstr &MI) const;
 };
 
 } // namespace llvm 

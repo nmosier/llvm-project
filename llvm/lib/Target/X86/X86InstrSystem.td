@@ -694,7 +694,13 @@ let Defs = [EAX, EDX], Uses = [ECX] in
 let Uses = [EAX, ECX, EDX] in
   def WRPKRUr : I<0x01, MRM_EF, (outs), (ins), "wrpkru",
                   [(X86wrpkru EAX, EDX, ECX)]>, TB;
+let Defs = [EAX, ECX, EDX] in {
+  // NHM-FIXME: ECX isn't actually a def - it should be a required zero?
+  def LOCKBOX_ENABLE : PseudoI<(outs), (ins), []>;
+  def LOCKBOX_DISABLE : PseudoI<(outs), (ins), []>;
+}
 } // SchedRW
+
 
 //===----------------------------------------------------------------------===//
 // FS/GS Base Instructions

@@ -114,6 +114,16 @@ int getFirstAddrOperandIdx(const MachineInstr &MI);
 /// Find any constant pool entry associated with a specific instruction operand.
 const Constant *getConstantFromPool(const MachineInstr &MI, unsigned OpNo);
 
+static inline bool isLockboxOpcode(unsigned Opcode) {
+  switch (Opcode) {
+  default:
+    return false;
+  case X86::LOCKBOX_ENABLE:
+  case X86::LOCKBOX_DISABLE:
+    return true;
+  }
+}
+
 } // namespace X86
 
 /// isGlobalStubReference - Return true if the specified TargetFlag operand is

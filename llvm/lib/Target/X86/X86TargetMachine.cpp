@@ -554,6 +554,7 @@ void X86PassConfig::addPostRegAlloc() {
     addPass(createX86LoadValueInjectionLoadHardeningPass());
   addPass(createX86FunctionPrivateStacksPass()); // NHM-FIXME: Probably need to
                                                  // move this elsewhere.
+  addPass(createX86LockboxPass(/*Lower*/true));
 }
 
 void X86PassConfig::addPreSched2() {

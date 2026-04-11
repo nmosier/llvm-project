@@ -4,6 +4,7 @@
 #include "X86InstrInfo.h"
 #include "X86RegisterInfo.h"
 #include "X86Subtarget.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -18,6 +19,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/Support/DebugLog.h"
 
 using namespace llvm;
 
@@ -106,6 +108,10 @@ private:
   }
 
   bool needScratchForPointerToFPSData() const override { return false; }
+
+  bool isLockboxInstr(const MachineInstr &MI) const override {
+    return X86::isLockboxOpcode(MI.getOpcode());
+  }
 };
 
 void X86FunctionPrivateStacks::loadPrivateStackPointerLeaf(
@@ -340,11 +346,13 @@ void X86FunctionPrivateStacks::emitPrologueCheck(MachineBasicBlock &CheckMBB,
       .addReg(Regs[1]);
 }
 
-void X86FunctionPrivateStacks::emitPrologueAlloc(MachineBasicBlock &AllocMBB, std::array<MCPhysReg, 2> Regs, const uint32_t *RegMask) {
+void X86FunctionPrivateStacks::emitPrologueAlloc(MachineBasicBlock &AllocMBB,
+                                                 std::array<MCPhysReg, 2> Regs,
+                                                 const uint32_t *RegMask) {
+  const Function &F = AllocMBB.getParent()->getFunction();
+  const bool Lockbox = F.hasFnAttribute(Attribute::Lockbox);
   // AllocMBB:
-  //   save callee-saved registers
   //   __fps_allocstack(__fps_stackidx_<name>);
-  //   restore callee-saved regsiters
   //   jmp CheckMBB
   BuildMI(AllocMBB, AllocMBB.end(), DebugLoc(), TII->get(X86::MOV64rm),
           X86::RDI)
@@ -359,12 +367,31 @@ void X86FunctionPrivateStacks::emitPrologueAlloc(MachineBasicBlock &AllocMBB, st
       .addUse(X86::RDI, RegState::ImplicitKill);
   MFI->setAdjustsStack(true);
   MFI->setHasCalls(true);
+
+  if (Lockbox) {
+#ifndef NDEBUG
+    LivePhysRegs LPR(*TRI);
+    LPR.addLiveOuts(AllocMBB);
+    for (MCPhysReg Reg : {X86::EAX, X86::EDX, X86::ECX})
+      assert(LPR.available(*MRI, Reg));
+#endif
+    BuildMI(AllocMBB, AllocMBB.end(), Loc, TII->get(X86::LOCKBOX_ENABLE));
+    LDBG() << "Added lockbox enable";
+  }
 }
 
 void X86FunctionPrivateStacks::emitEpilogueImpl(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
     std::array<MCPhysReg, 2> Regs) {
   auto [ScratchReg, PSPReg] = Regs;
+  const Function &F = MBB.getParent()->getFunction();
+
+  const bool Lockbox = F.hasFnAttribute(Attribute::Lockbox);
+
+#if 0
+  if (Lockbox)
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::LOCKBOX_ENABLE));
+#endif
 
   // load ScratchReg, [PSPReg - 16]
   BuildMI(MBB, MBBI, Loc, TII->get(X86::MOV64rm), ScratchReg)
@@ -390,6 +417,11 @@ void X86FunctionPrivateStacks::emitEpilogueImpl(
       .addImm(0)
       .addReg(X86::NoRegister)
       .addReg(ScratchReg);
+
+#if 0
+  if (Lockbox)
+    BuildMI(MBB, MBBI, Loc, TII->get(X86::LOCKBOX_DISABLE));
+#endif
 }
 
 } // end namespace

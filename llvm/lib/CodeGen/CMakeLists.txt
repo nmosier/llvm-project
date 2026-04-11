@@ -260,6 +260,7 @@ add_llvm_component_library(LLVMCodeGen
   WinEHPrepare.cpp
   XRayInstrumentation.cpp
   TargetFunctionPrivateStacks.cpp
+  TargetLockbox.cpp
   ${GeneratedMLSources}
 
   LiveDebugValues/LiveDebugValues.cpp

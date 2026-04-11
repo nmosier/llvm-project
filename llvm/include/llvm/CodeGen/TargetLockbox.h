@@ -10,6 +10,7 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/MC/MCRegister.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/ErrorHandling.h"
 
 namespace llvm {
 
@@ -24,9 +25,13 @@ protected:
   const DebugLoc Loc;
   const TargetInstrInfo *TII = nullptr;
   const TargetRegisterInfo *TRI = nullptr;
-  const MachineRegisterInfo *MRI = nullptr;
+  MachineRegisterInfo *MRI = nullptr;
   const GlobalVariable *MaskEnableSym = nullptr;
   const GlobalVariable *MaskDisableSym = nullptr;
+
+  using AccessPoint = std::pair<MachineBasicBlock::iterator, bool>;
+  using AccessPointVec = SmallVector<AccessPoint>;
+  using AccessPointVecImpl = SmallVectorImpl<AccessPoint>;
 
   using ProgramPoint =
       std::pair<MachineBasicBlock *, MachineBasicBlock::iterator>;
@@ -36,6 +41,12 @@ protected:
 
   MCPhysReg getScratchReg(const LivePhysRegs &LPR, ArrayRef<MCPhysReg> Ignore = {}) const;
   MCPhysReg getScratchReg(const MachineBasicBlock &MBB, MachineBasicBlock::const_iterator MBBI, ArrayRef<MCPhysReg> Ignore = {}) const;
+
+  void initialize(MachineFunction &MF);
+
+  void optimizeAccesses(MachineBasicBlock &MBB,
+                        AccessPointVecImpl &AccessPoints) const;
+  virtual bool shouldOptimizeAccesses() const = 0;
 
 private:
 
@@ -55,7 +66,7 @@ public:
   TargetLockbox(char &ID, bool IsIndirectControlSafe, unsigned MaskBitWidth, const TargetRegisterClass &ScratchRC)
       : MachineFunctionPass(ID), IsIndirectControlSafe(IsIndirectControlSafe), MaskBitWidth(MaskBitWidth), ScratchRC(ScratchRC) {}
   
-  bool runOnMachineFunction(MachineFunction &MF) final;
+  bool runOnMachineFunction(MachineFunction &MF) override;
 };
 
 }

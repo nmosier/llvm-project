@@ -1383,7 +1383,6 @@ def ADJCALLSTACKDOWN : Pseudo<(outs), (ins i32imm:$amt1, i32imm:$amt2),
 def ADJCALLSTACKUP : Pseudo<(outs), (ins i32imm:$amt1, i32imm:$amt2),
                             [(AArch64callseq_end timm:$amt1, timm:$amt2)]>,
                             Sched<[]>;
-
 }
 
 let Defs = [SP, NZCV], Uses = [SP] in {

@@ -2270,6 +2270,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::NoCreateUndefOrPoison;
   case bitc::ATTR_KIND_FUNCTION_PRIVATE_STACK:
     return Attribute::FunctionPrivateStack;
+  case bitc::ATTR_KIND_LOCKBOX:
+    return Attribute::Lockbox;
   }
 }
 

@@ -985,7 +985,8 @@ void TargetPassConfig::addISelPrepare() {
   // only protect functions that have corresponding attributes.
   addPass(createSafeStackPass());
   addPass(createFunctionPrivateStacksPass());
-  addPass(createLockboxPass());
+  // NHM-NOTE: No longer using the IR lockbox pass.
+  // addPass(createLockboxPass());
   addPass(createStackProtectorPass());
 
   if (PrintISelInput)

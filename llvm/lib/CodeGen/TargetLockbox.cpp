@@ -4,7 +4,10 @@
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
+#include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -14,6 +17,8 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/Support/DebugLog.h"
+#include <utility>
 
 #define DEBUG_TYPE "target-lockbox"
 
@@ -30,8 +35,14 @@ static bool mayLowerToIndirectCall(const MachineInstr &MI) {
   const MachineOperand &MO = MI.getOperand(0);
   if (MO.isReg())
     return true;
+  if (!MO.isGlobal()) {
+    LDBG() << "unhandled call operand type: " << MO;
+    return true;
+  }
   assert(MO.isGlobal());
-  const auto *G = cast<Function>(MO.getGlobal());
+  const auto *G = dyn_cast<Function>(MO.getGlobal());
+  if (!G)
+    return true;
   // Sanity check: dso_local should be a superset?
   sanityCheckDSOLocal(*G);
   if (G->isDSOLocal())
@@ -64,11 +75,16 @@ static bool mustCalleeHaveLockboxAttr(const MachineInstr &MI) {
   // of the called operand.
   if (MO.isReg())
     return false;
+  if (!MO.isGlobal()) {
+    LDBG() << "unhandled call operand type: " << MO;
+    return false;
+  }
 
   // The call is direct.
   assert(MO.isGlobal());
-  const Function *G = cast<Function>(MO.getGlobal());
-  assert(G);
+  const Function *G = dyn_cast<Function>(MO.getGlobal());
+  if (!G)
+    return false;
 
   // If the callee doesn't have the Lockbox attribute,
   // then it doesn't need access.
@@ -146,7 +162,7 @@ void TargetLockbox::identifyEnableAccessPoints(
   if (const auto *JTI = MF.getJumpTableInfo(); !IsIndirectControlSafe && JTI)
     for (const auto &JTE : JTI->getJumpTables())
       for (auto *MBB : JTE.MBBs)
-        Out.emplace_back(MBB, MBB->begin());
+        Out.emplace_back(MBB, MBB->getFirstNonPHI());
 
   // Add post-calls.
   for (auto &MBB : MF)
@@ -155,15 +171,60 @@ void TargetLockbox::identifyEnableAccessPoints(
         Out.emplace_back(&MBB, std::next(MI.getIterator()));
 }
 
+static constexpr bool Enable = true;
+static constexpr bool Disable = false;
+
+void TargetLockbox::optimizeAccesses(MachineBasicBlock &MBB,
+                                     AccessPointVecImpl &MBBIs) const {
+  AccessPointVec OrderedMBBIs;
+  bool SeenMemoryAccess = false;
+  for (auto MBBI = MBB.begin();;) {
+    const bool IsEnable = llvm::is_contained(MBBIs, AccessPoint(MBBI, Enable));
+    const bool IsDisable =
+        llvm::is_contained(MBBIs, AccessPoint(MBBI, Disable));
+    // Enable semantically precedes disable.
+    if (IsEnable) {
+      // NOTE: This assertion was rightfully failing if the callee might've
+      // been called from multiple places.
+      // assert(OrderedMBBIs.empty() || OrderedMBBIs.back().second == Disable);
+      SeenMemoryAccess = false;
+      OrderedMBBIs.emplace_back(MBBI, Enable);
+    }
+    if (IsDisable) {
+      if (SeenMemoryAccess) {
+        OrderedMBBIs.emplace_back(MBBI, Disable);
+      } else if (!OrderedMBBIs.empty()) {
+        assert(OrderedMBBIs.back().second == Enable);
+        LDBG() << "Removing dead enable: " << *OrderedMBBIs.back().first;
+        OrderedMBBIs.pop_back();
+      }
+    }
+
+    if (MBBI == MBB.end())
+      break;
+
+    SeenMemoryAccess |= MBBI->mayLoadOrStore();
+
+    ++MBBI;
+  }
+
+  MBBIs = std::move(OrderedMBBIs);
+}
+
+static void deduplicateAccesses(SmallVector<std::pair<MachineBasicBlock::iterator, bool>> &MBBIs) {
+  SmallVector<std::pair<MachineBasicBlock::iterator, bool>> Out;
+  for (const auto &p : MBBIs)
+    if (!llvm::is_contained(Out, p))
+      Out.push_back(p);
+  MBBIs = std::move(Out);
+}
+
 void TargetLockbox::instrumentFunction(MachineFunction &MF,
                                        ProgramPointVec &EnablePoints,
                                        ProgramPointVec &DisablePoints) {
   // NHM-TODO: Can optimize this with a data-flow analysis.
-  const bool Enable = true;
-  const bool Disable = false;
+
   // Rekey program points by basic block.
-  using AccessPoint = std::pair<MachineBasicBlock::iterator, bool>;
-  using AccessPointVec = SmallVector<AccessPoint>;
   std::unordered_map<MachineBasicBlock *, AccessPointVec> Map;
 
   for (auto [MBB, MBBI] : EnablePoints)
@@ -171,65 +232,42 @@ void TargetLockbox::instrumentFunction(MachineFunction &MF,
   for (auto [MBB, MBBI] : DisablePoints)
     Map[MBB].emplace_back(MBBI, Disable);
 
+  // NHM-FIXME: Extract the filtering.
   for (MachineBasicBlock &MBB : MF) {
     const auto &MBBIs = Map[&MBB];
-    AccessPointVec OrderedMBBIs;
-    bool SeenMemoryAccess = false;
-    for (auto MBBI = MBB.begin(); MBBI != MBB.end(); ++MBBI) {
-      const bool IsEnable =
-          llvm::is_contained(MBBIs, AccessPoint(MBBI, Enable));
-      const bool IsDisable =
-          llvm::is_contained(MBBIs, AccessPoint(MBBI, Disable));
-      // Enable semantically precedes disable.
-      if (IsEnable) {
-        // NOTE: This assertion was rightfully failing if the callee might've
-        // been called from multiple places.
-        // assert(OrderedMBBIs.empty() || OrderedMBBIs.back().second == Disable);
-        SeenMemoryAccess = false;
-        OrderedMBBIs.emplace_back(MBBI, Enable);
-      }
-      if (IsDisable) {
-        assert(!OrderedMBBIs.empty() && OrderedMBBIs.back().second == Enable);
-        if (SeenMemoryAccess) {
-          OrderedMBBIs.emplace_back(MBBI, Disable);
-        } else {
-          OrderedMBBIs.pop_back();
-        }
-      }
+    AccessPointVec OrderedMBBIs = MBBIs;
+    if (shouldOptimizeAccesses()) {
+      optimizeAccesses(MBB, OrderedMBBIs);
+    } else {
+      deduplicateAccesses(OrderedMBBIs);
     }
 
     // Instrument the block.
     for (auto [MBBI, Access] : OrderedMBBIs) {
       emitAccess(MBB, MBBI, Access == Enable);
+      LDBG() << "Emitted access";
     }
   }
 }
 
 bool TargetLockbox::runOnMachineFunction(MachineFunction &MF) {
+  initialize(MF);
+
   Function &F = MF.getFunction();
   if (!F.hasFnAttribute(Attribute::Lockbox))
     return false;
 
-  const auto &STI = MF.getSubtarget();
-  TII = STI.getInstrInfo();
-  TRI = STI.getRegisterInfo();
-  MRI = &MF.getRegInfo();
+  LDBG() << "Processing " << MF.getName();
 
-  Module &M = *F.getParent();
-  LLVMContext &Ctx = M.getContext();
-  auto *MaskTy = IntegerType::get(Ctx, MaskBitWidth);
-  // NHM-TODO: Might be able to mark this as constant?
-  // NHM-TODO: If we make both passes pre-regalloc, we could load the mask into a vreg.
-  MaskEnableSym =
-      new GlobalVariable(M, MaskTy, false, GlobalVariable::ExternalLinkage,
-                         nullptr, "__lockbox_mask_enable");
-  MaskDisableSym = new GlobalVariable(M, MaskTy, false, GlobalVariable::ExternalLinkage, nullptr, "__lockbox_mask_disable");
-  
   SmallVector<ProgramPoint> EnablePoints, DisablePoints;
   identifyEnableAccessPoints(MF, EnablePoints);
   identifyDisableAccessPoints(MF, DisablePoints);
 
+  LDBG() << "Found " << EnablePoints.size() << " enable points and " << DisablePoints.size() << " disable points";
+
   instrumentFunction(MF, EnablePoints, DisablePoints);
+
+  MF.verify(nullptr, nullptr, &errs());
 
   return true;
 }
@@ -260,4 +298,27 @@ MCPhysReg TargetLockbox::getScratchReg(
   LivePhysRegs LPR(*TRI);
   getLiveRegsAt(MBB, MBBI, LPR);
   return getScratchReg(LPR, Blacklist);
+}
+
+void TargetLockbox::initialize(MachineFunction &MF) {
+  const auto &STI = MF.getSubtarget();
+  TII = STI.getInstrInfo();
+  TRI = STI.getRegisterInfo();
+  MRI = &MF.getRegInfo();
+
+  Module &M = *MF.getFunction().getParent();
+  LLVMContext &Ctx = M.getContext();
+
+  auto *MaskTy = IntegerType::get(Ctx, MaskBitWidth);
+  // NHM-TODO: Might be able to mark this as constant?
+  // NHM-TODO: If we make both passes pre-regalloc, we could load the mask into
+  // a vreg.
+  const StringRef MaskEnableName = "__lockbox_mask_enable";
+  const StringRef MaskDisableName = "__lockbox_mask_disable";
+  auto CreateMaskSym = [&] (StringRef Name) -> GlobalVariable * {
+    return new GlobalVariable(M, MaskTy, false, GlobalVariable::ExternalLinkage, nullptr, Name);
+  };
+  MaskEnableSym = M.getOrInsertGlobal(MaskEnableName, MaskTy, [&] { return CreateMaskSym(MaskEnableName); });
+  MaskDisableSym = M.getOrInsertGlobal(MaskDisableName, MaskTy, [&] { return CreateMaskSym(MaskDisableName); });
+
 }

@@ -2,6 +2,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/CodeGen/FunctionPrivateStacks.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
@@ -14,6 +15,7 @@
 #include "llvm/MC/MCRegister.h"
 #include "llvm/Support/DebugLog.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/KnownFPClass.h"
 
 #define DEBUG_TYPE "target-fps"
 
@@ -139,7 +141,7 @@ bool TargetFunctionPrivateStacks::runOnMachineFunction(MachineFunction &MF) {
   // Note: Private stack objects are now marked with StackID::PrivateStack,
   // so PEI will skip them automatically. No need to remove them.
 
-  MF.verify();
+  MF.verify(nullptr, nullptr, &errs());
 
   instrumentSetjmps(MF);
 
@@ -297,17 +299,51 @@ void TargetFunctionPrivateStacks::loadPrivateStackPointer(
   }
 }
 
+MachineBasicBlock::iterator
+TargetFunctionPrivateStacks::getPrologueInsertionPoint(MachineBasicBlock &MBB) const {
+  auto Skip = [&](const MachineInstr &MI) -> bool {
+    return isLockboxInstr(MI);
+  };
+  return llvm::find_if_not(MBB, Skip);
+}
+
+MachineBasicBlock::iterator
+TargetFunctionPrivateStacks::getEpilogueInsertionPoint(MachineInstr &MI) const {
+  // NHM-FIXME: This might be broken.
+  assert(MI.isReturn());
+  auto MBBI = MI.getIterator();
+  auto Begin = MI.getParent()->begin();
+  while (true) {
+    if (MBBI == Begin)
+      break;
+    auto PrevMBBI = std::prev(MBBI);
+    // HACK: If we see a disable before a call, then
+    // it must be disabling on return.
+    if (PrevMBBI->mayLoadOrStore() || PrevMBBI->isCall())
+      break;
+    // NHM-FIXME: Really should be checking if its a LOCKBOX_DISABLE.
+    if (isLockboxInstr(*MBBI))
+      break;
+    MBBI = PrevMBBI;
+  }
+
+  return MBBI;
+}
+
 void TargetFunctionPrivateStacks::emitPrologue(MachineFunction &MF,
                                                unsigned PrivateFrameSize) {
   assert(PrivateFrameSize > 0);
   assert(MF.getFunction().fpsKind() == Function::FullFPS);
 
   MachineBasicBlock &EntryMBB = MF.front();
+  // This is where we'll split the entry block.
+  auto EntrySplitMBBI = getPrologueInsertionPoint(EntryMBB);
 
   // Claim a scratch register for use in checking whether we've reached the end
   // of the FPS linked list of stack frames.
   LivePhysRegs LPR(*TRI);
   LPR.addLiveIns(EntryMBB);
+  for (auto MBBI = EntryMBB.begin(); MBBI != EntrySplitMBBI; ++MBBI) {}
   MCPhysReg ScratchReg = getScratchReg(LPR);
 
   // Make sure EFLAGS isn't live-in to the function, as we will clobber it.
@@ -315,18 +351,29 @@ void TargetFunctionPrivateStacks::emitPrologue(MachineFunction &MF,
 
   const uint32_t *RegMask = TRI->getCallPreservedMask(MF, CallingConv::C);
 
+  // NHM-FIXME: Need to split the entry block.
   MachineBasicBlock &NewEntryMBB = *MF.CreateMachineBasicBlock();
+  // NHM-FIXME: Probably need to update live-ins properly if we're actually gonna be splitting mid-block.
   MachineBasicBlock &CheckMBB = *MF.CreateMachineBasicBlock();
   MachineBasicBlock &AllocMBB = *MF.CreateMachineBasicBlock();
   MF.push_front(&CheckMBB);
   MF.push_front(&NewEntryMBB);
   MF.push_back(&AllocMBB);
-  for (const auto &LI : EntryMBB.liveins()) {
+  NewEntryMBB.splice(NewEntryMBB.end(), &EntryMBB, EntryMBB.begin(), EntrySplitMBBI);
+
+  // NHM-NOTE: We just fully recompute liveins instead.
+#if 0
+  for (const auto &LI : EntryMBB.liveins())
+    NewEntryMBB.addLiveIn(LI);
+  // NHM-TODO: use llvm::addLiveIns(LPR)?
+  for (const auto &LI : LPR) {
     CheckMBB.addLiveIn(LI);
     AllocMBB.addLiveIn(LI);
-    NewEntryMBB.addLiveIn(LI);
   }
+#endif
+  
   NewEntryMBB.addSuccessor(&CheckMBB);
+  // NHM-FIXME: We're not updating the liveins to the old 
 
   // NHM-TODO: Propagate to uses and eliminate this array.
   std::array<MCPhysReg, 2> Regs = {ScratchReg, PSPReg};
@@ -366,8 +413,12 @@ void TargetFunctionPrivateStacks::emitPrologue(MachineFunction &MF,
     TII->storeRegToStackSlot(AllocMBB, AllocPreMBBI, Reg, /*isKill*/true, FI, RC, /*VReg*/MCRegister::NoRegister);
     TII->loadRegFromStackSlot(AllocMBB, AllocMBB.end(), Reg, FI, RC, /*VReg*/MCRegister::NoRegister);
   }
-  TII->insertUnconditionalBranch(AllocMBB, &CheckMBB, DebugLoc());  
+  TII->insertUnconditionalBranch(AllocMBB, &CheckMBB, DebugLoc());
   AllocMBB.addSuccessor(&CheckMBB);
+
+  // Now that we have inserted all instructions, fully recompute the live ins
+  // for the blocks we modified.
+  llvm::fullyRecomputeLiveIns({&EntryMBB, &NewEntryMBB, &CheckMBB, &AllocMBB});
 }
 
 void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned PrivateFrameSize) {
@@ -378,7 +429,7 @@ void TargetFunctionPrivateStacks::emitEpilogue(MachineFunction &MF, unsigned Pri
     if (MBB.empty() || !MBB.back().isReturn())
       continue;
 
-    auto MBBI = MBB.back().getIterator();
+    auto MBBI = getEpilogueInsertionPoint(MBB.back());
 
     LivePhysRegs LPR(*TRI);
     LPR.addLiveOuts(MBB);

@@ -24,7 +24,9 @@ public:
   }
 
 private:
-  void emitAccess(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI, bool IsEnable) override;
+  void emitAccess(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+                  bool IsEnable) override;
+  bool shouldOptimizeAccesses() const override { return true; }
 };
 
 void AArch64Lockbox::emitAccess(MachineBasicBlock &MBB,

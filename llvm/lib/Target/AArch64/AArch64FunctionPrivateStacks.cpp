@@ -108,6 +108,9 @@ private:
   void loadRegFromBaseReg(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI, Register Dest,
                           Register Src) const override;
+
+  // We return false because lockbox always runs after FPS in the AArch64 backend.
+  bool isLockboxInstr(const MachineInstr &MI) const override { return false; }
 };
 
 } // namespace
