@@ -821,6 +821,12 @@ class SizeClassAllocator64 {
                                     user_map_size,
                                     "SizeClassAllocator: region data")))
         return false;
+      // Notify callback of user-visible (chunk) memory specifically, so that
+      // callbacks that apply per-allocation protections can distinguish it
+      // from allocator bookkeeping commits (region info, free arrays,
+      // metadata). This is fired in addition to OnMap, not instead of it.
+      MapUnmapCallback().OnMapUser(region_beg + region->mapped_user,
+                                   user_map_size);
       stat->Add(AllocatorStatMapped, user_map_size);
       region->mapped_user += user_map_size;
     }

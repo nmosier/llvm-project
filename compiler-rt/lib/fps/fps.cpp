@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -9,6 +10,7 @@
 #include "safestack/safestack_platform.h"
 #include "fps/fps_util.h"
 #include "fps/fps_ll.h"
+#include "lockbox/lockbox.h"
 
 // ===== PROJECTS ===== //
 // Resizeable, Pinned Stack Vectors: (OBSOLETE?)
@@ -43,6 +45,22 @@
 
 using namespace __fps; // NHM-FIXME: Shouldn't need this later on.
 
+extern "C" {
+
+// Boolean flag indicating whether Lockbox is currently enabled.
+// This is declared weak so that if the actual Lockbox runtime is
+// linked in, its definition (which will be set to true) will
+// replace this one.
+__attribute__((weak)) bool __lockbox_enabled = false;
+
+// Weak wrappers for enabling/disabling of access, in case lockbox isn't linked
+// in.
+// NHM-FIXME: These need to be inlined... find a way that works without weak symbol resolution.
+__attribute__((weak)) void __lockbox_access_enable(void) {}
+__attribute__((weak)) void __lockbox_access_disable(void) {}
+
+}
+
 void fps_log(const char *fmt, ...) {
   static bool read_env_var = true;
   static bool env_var = false;
@@ -73,6 +91,27 @@ using ThreadID = safestack::ThreadId;
 
 void thread_cleanup_handler(void *_iter);
 void garbage_collect_threads(void);
+
+void *frame_malloc(size_t size) {
+  if (__lockbox_enabled) {
+    return __lockbox_malloc(size);
+  } else {
+    return malloc(size);
+  }
+}
+
+void frame_free(void *p) {
+  if (__lockbox_enabled) {
+    __lockbox_free(p);
+  } else {
+    free(p);
+  }
+}
+
+struct OpenLockbox {
+  OpenLockbox() { __lockbox_access_enable(); }
+  ~OpenLockbox() { __lockbox_access_disable(); }
+};
 
 constexpr size_t kDefaultMaxPrivateStacks = 0x100000;
 size_t gMaxPrivateStacks = kDefaultMaxPrivateStacks;
@@ -109,6 +148,30 @@ struct frame_t {
   frame_handle_t *current_frame_ptr;
   frame_handle_t prev;
   frame_handle_t next;
+
+  static frame_t *Create(size_t private_frame_size,
+                         frame_handle_t *current_frame_ptr, frame_handle_t prev,
+                         frame_handle_t next) {
+    LOCKBOX_CHECK(!__lockbox_access_enabled());
+    const size_t size = private_frame_size + sizeof(frame_t);
+    frame_t *p = nullptr;
+    if (__lockbox_enabled) {
+      p = (frame_t *) __lockbox_malloc(size);
+      // Briefly enable access to update the pointers.
+    } else {
+      p = (frame_t *) malloc(size);
+    }
+
+    // If needed, enable read access.
+    // NHM-FIXME: Need to inline this.
+    __lockbox_access_enable();
+    p->current_frame_ptr = current_frame_ptr;
+    p->prev = prev;
+    p->next = next;
+    __lockbox_access_disable();
+
+    return p;
+  }
 };
 
 frame_t &frame_handle_t::operator*() {
@@ -132,13 +195,16 @@ frame_handle_t &frame_handle_t::operator=(frame_t *frame) {
   return *this;
 }
 
-frame_handle_t::operator frame_t*() const {
-  return end - 1;
-}
+frame_handle_t::operator frame_t *() const { return end - 1; }
+
+struct meta_frame_t {
+  frame_t *frame;
+  meta_frame_t *next;
+};
 
 struct fps_t {
   frame_handle_t current_frame;
-  frame_t *top_frame; // NHM-FIXME: Don't need this necessarily.
+  frame_t *top_frame; // NHM-FIXME: Don't need this necessarily. You can walk up the current_frame?
   size_t private_frame_size;
 
   fps_t(): top_frame(nullptr), private_frame_size(0) {}
@@ -163,12 +229,15 @@ public:
     this->private_frame_size = private_frame_size;
 
     // NHM-FIXME: Should ensure this is properly aligned.
-    current_frame = (frame_t *)malloc(getFrameAllocSize());
+    current_frame = (frame_t *) frame_malloc(getFrameAllocSize());
     // NHM-FIXME: Should initialize this.
     FPS_CHECK(current_frame);
-    current_frame->current_frame_ptr = &current_frame;
-    current_frame->prev = current_frame;
-    current_frame->next = current_frame;
+    {
+      OpenLockbox lockbox;
+      current_frame->current_frame_ptr = &current_frame;
+      current_frame->prev = current_frame;
+      current_frame->next = current_frame;
+    }
 
     FPS_LOG("current_frame=%p private_frame_size=%lu\n", static_cast<frame_t *>(current_frame), private_frame_size);
 
@@ -177,18 +246,17 @@ public:
 
   void Deregister() {
     // Free frame linked list.
-    for (frame_t *it = current_frame->prev; it != it->prev; ) {
-      frame_t *prev = it->prev;
-      memset(it, 0, getFrameAllocSize());
-      free(it); // NHM-FIXME: Creat function free_and_zero. Actually frees should just always free.
-      it = prev;
-    }
-    for (frame_t *it = current_frame->next; it != it->next; ) {
+    OpenLockbox lockbox; // NHM-FIXME: NEED TO MITIGATE THIS FUNCTION!!!!
+    frame_t *it = top_frame;
+    while (true) {
       frame_t *next = it->next;
-      free(it);
+      bool done = (it == next);
+      memset(it, 0, getFrameAllocSize());
+      frame_free(it);
+      if (done)
+        break;
       it = next;
     }
-    free(current_frame);
 
     // Zero out variables to indicate deregistration.
     current_frame = nullptr;
@@ -218,13 +286,15 @@ public:
   void MoreStack() {
     FPS_CHECK(current_frame->next == current_frame);
 
-    frame_t *new_frame = (frame_t *) malloc(private_frame_size + sizeof(frame_t));
+    frame_t *new_frame = (frame_t *) frame_malloc(private_frame_size + sizeof(frame_t));
     FPS_CHECK(new_frame);
-    current_frame->next = new_frame;
-    new_frame->current_frame_ptr = &current_frame;
-    new_frame->prev = current_frame;
-    new_frame->next = new_frame;
-
+    {
+      OpenLockbox lockbox;
+      current_frame->next = new_frame;
+      new_frame->current_frame_ptr = &current_frame;
+      new_frame->prev = current_frame;
+      new_frame->next = new_frame;
+    }
     FPS_LOG("morestack: new frame @ %p\n", new_frame);
   }
 };

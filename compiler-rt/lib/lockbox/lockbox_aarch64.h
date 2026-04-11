@@ -18,7 +18,7 @@ static inline void set_pkru(pkey_mask_t mask) {
 
 static inline pkey_mask_t get_pkru(void) {
   pkey_mask_t pkru;
-  asm("msr %0, POR_EL0" : "=r"(pkru));
+  asm("mrs %0, POR_EL0" : "=r"(pkru));
   return pkru;
 }
 

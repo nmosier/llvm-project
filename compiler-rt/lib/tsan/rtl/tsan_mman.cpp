@@ -27,6 +27,7 @@ namespace __tsan {
 
 struct MapUnmapCallback {
   void OnMap(uptr p, uptr size) const { }
+  void OnMapUser(uptr p, uptr size) const {}
   void OnMapSecondary(uptr p, uptr size, uptr user_begin,
                       uptr user_size) const {};
   void OnUnmap(uptr p, uptr size) const {

@@ -64,6 +64,12 @@ inline void RandomShuffle(T *a, u32 n, u32 *rand_state) {
 
 struct NoOpMapUnmapCallback {
   void OnMap(uptr p, uptr size) const {}
+  // Called in addition to OnMap, only for commits that back user-visible
+  // allocations in the primary allocator (i.e., the region's user-data area,
+  // not region info / free arrays / metadata). Allows callbacks that want to
+  // apply per-allocation protections (e.g. pkey_mprotect) to distinguish user
+  // memory from allocator bookkeeping.
+  void OnMapUser(uptr p, uptr size) const {}
   void OnMapSecondary(uptr p, uptr size, uptr user_begin,
                       uptr user_size) const {}
   void OnUnmap(uptr p, uptr size) const {}

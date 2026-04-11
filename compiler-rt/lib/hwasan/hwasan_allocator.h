@@ -54,6 +54,7 @@ static_assert(sizeof(Metadata) == 16);
 
 struct HwasanMapUnmapCallback {
   void OnMap(uptr p, uptr size) const { UpdateMemoryUsage(); }
+  void OnMapUser(uptr p, uptr size) const {}
   void OnMapSecondary(uptr p, uptr size, uptr user_begin,
                       uptr user_size) const {
     UpdateMemoryUsage();
